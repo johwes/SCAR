@@ -9,7 +9,7 @@ spec:
       description: Shared workspace; reads .scar/combined.bc, writes .scar/results.sarif
   steps:
     - name: ikos
-      image: ghcr.io/your-org/scar-ikos:latest
+      image: quay.io/your-org/scar-ikos:latest
       script: |
         #!/bin/bash
         set -euo pipefail
@@ -29,7 +29,7 @@ spec:
         echo "SARIF written to $SARIF"
 
     - name: cppcheck
-      image: ghcr.io/your-org/scar-ikos:latest
+      image: quay.io/your-org/scar-ikos:latest
       script: |
         #!/bin/bash
         set -euo pipefail
