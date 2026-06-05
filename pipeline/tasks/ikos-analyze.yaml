@@ -28,27 +28,31 @@ spec:
             --entry-points=main \
             --analyses=boa,dbz,nullity \
             --output-db="$db" \
-            "$bc" || true  # continue on analysis errors
+            "$bc" || true
 
           ikos-report --format=sarif "$db" > "$sarif"
           echo "  -> $sarif"
         done
 
-        # Merge all per-file SARIF into one results.sarif
-        python3 - <<'PYEOF'
-import json, glob, os
+    - name: merge-sarif
+      image: quay.io/jwesterl/scar-ikos:latest
+      script: |
+        #!/usr/bin/env python3
+        import json, glob
 
-sarif_dir = os.environ.get("SARIF_DIR", "/workspace/source/.scar/sarif")
-out_path  = "/workspace/source/.scar/results.sarif"
+        sarif_dir = "/workspace/source/.scar/sarif"
+        out_path  = "/workspace/source/.scar/results.sarif"
 
-merged = {"version": "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json", "runs": []}
-for f in sorted(glob.glob(f"{sarif_dir}/*.sarif")):
-    data = json.load(open(f))
-    merged["runs"].extend(data.get("runs", []))
+        merged = {
+            "version": "2.1.0",
+            "runs": []
+        }
+        for f in sorted(glob.glob(f"{sarif_dir}/*.sarif")):
+            data = json.load(open(f))
+            merged["runs"].extend(data.get("runs", []))
 
-json.dump(merged, open(out_path, "w"), indent=2)
-print(f"Merged {len(merged['runs'])} IKOS run(s) -> {out_path}")
-PYEOF
+        json.dump(merged, open(out_path, "w"), indent=2)
+        print(f"Merged {len(merged['runs'])} IKOS run(s) -> {out_path}")
 
     - name: cppcheck
       image: quay.io/jwesterl/scar-ikos:latest
