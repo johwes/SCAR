@@ -62,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cppcheck \
     libsqlite3-0 \
     libgmp10 \
+    libgmpxx4ldbl \
     libboost-filesystem1.74.0 \
     libboost-thread1.74.0 \
     libtbb12 \
