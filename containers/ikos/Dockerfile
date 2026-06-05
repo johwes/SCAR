@@ -65,5 +65,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/ikos /opt/ikos
 ENV PATH="/opt/ikos/bin:$PATH"
+# IKOS is a Python wrapper — set PYTHONPATH based on the installed Python version
+RUN PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") \
+ && echo "PYTHONPATH=/opt/ikos/libexec/lib/python${PYVER}/site-packages" >> /etc/environment
+ENV PYTHONPATH=/opt/ikos/libexec/lib/python3.10/site-packages
 
 WORKDIR /workspace
