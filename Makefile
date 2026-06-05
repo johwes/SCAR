@@ -13,7 +13,7 @@ build-ikos:
 	docker build --no-cache -t $(IKOS_IMAGE) containers/ikos/
 
 build-agent:
-	docker build --no-cache -t $(AGENT_IMAGE) containers/scar/
+	docker build --no-cache -t $(AGENT_IMAGE) -f containers/scar/Dockerfile .
 
 push: push-ikos push-agent
 
