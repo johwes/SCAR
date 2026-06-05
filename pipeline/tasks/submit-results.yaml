@@ -1,0 +1,25 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-submit-results
+spec:
+  description: Archive accepted patches and publish a summary report.
+  workspaces:
+    - name: source
+  steps:
+    - name: summarise
+      image: ghcr.io/your-org/scar-agent:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+        RESULTS="$WS/.scar/scar-results.json"
+
+        if [ ! -f "$RESULTS" ]; then
+          echo "No results file found — nothing to submit"
+          exit 0
+        fi
+
+        COUNT=$(python3 -c "import json,sys; print(len(json.load(open('$RESULTS'))))")
+        echo "Accepted patches: $COUNT"
+        cat "$RESULTS"

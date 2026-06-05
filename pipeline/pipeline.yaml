@@ -1,0 +1,80 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: scar
+spec:
+  description: >
+    SCAR — Static C Analysis & Repair pipeline.
+    Compiles C to LLVM bitcode, runs IKOS static analysis, synthesizes and
+    validates LLM-generated patches via skeptical triage.
+  params:
+    - name: repo-url
+      description: Git URL of the C repository to scan
+    - name: revision
+      default: main
+    - name: source-dir
+      default: "."
+    - name: triage-rounds
+      default: "5"
+    - name: min-confidence
+      default: "0.6"
+  workspaces:
+    - name: shared-data
+      description: PVC shared across all tasks
+  tasks:
+    - name: clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-data
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+
+    - name: build-bitcode
+      taskRef:
+        name: scar-build-bitcode
+      runAfter: [clone]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    - name: ikos-analyze
+      taskRef:
+        name: scar-ikos-analyze
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+
+    - name: repair-loop
+      taskRef:
+        name: scar-repair-loop
+      runAfter: [ikos-analyze]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: triage-rounds
+          value: $(params.triage-rounds)
+        - name: min-confidence
+          value: $(params.min-confidence)
+
+    - name: submit-results
+      taskRef:
+        name: scar-submit-results
+      runAfter: [repair-loop]
+      workspaces:
+        - name: source
+          workspace: shared-data

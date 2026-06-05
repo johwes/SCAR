@@ -1,0 +1,47 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-repair-loop
+spec:
+  description: >
+    Core SCAR repair loop: parse IKOS SARIF → generate context → synthesize
+    patch → skeptical triage → validate. Accepts patches written to the
+    workspace for downstream submission.
+  params:
+    - name: triage-rounds
+      default: "5"
+    - name: min-confidence
+      default: "0.6"
+  workspaces:
+    - name: source
+      description: Shared workspace with C source and .scar/ analysis artifacts
+  env:
+    - name: LLM_BASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: scar-llm-credentials
+          key: base_url
+    - name: LLM_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: scar-llm-credentials
+          key: api_key
+    - name: LLM_MODEL
+      valueFrom:
+        secretKeyRef:
+          name: scar-llm-credentials
+          key: model
+  steps:
+    - name: repair
+      image: ghcr.io/your-org/scar-agent:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+
+        python -m scar \
+          "$WS/.scar/results.sarif" \
+          "$WS" \
+          --triage-rounds=$(params.triage-rounds) \
+          --min-confidence=$(params.min-confidence) \
+          --output="$WS/.scar/scar-results.json"
