@@ -4,7 +4,7 @@
 
 FROM quay.io/centos/centos:stream9 AS builder
 
-ARG IKOS_VERSION=3.4
+ARG IKOS_VERSION=3.5
 
 RUN dnf install -y dnf-plugins-core \
  && dnf config-manager --set-enabled crb \
