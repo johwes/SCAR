@@ -1,9 +1,9 @@
 # IKOS analysis container — multi-stage build
-# Builder follows the steps from IKOS's own upstream CI (ubuntu:latest/llvm-14)
+# Builder follows the steps from IKOS's own upstream CI (ubuntu:22.04/llvm-14)
 # Stage 1: build IKOS from source
 # Stage 2: runtime image with IKOS binary + cppcheck
 
-FROM ubuntu:latest AS builder
+FROM ubuntu:22.04 AS builder
 
 ARG IKOS_VERSION=3.5
 ENV DEBIAN_FRONTEND=noninteractive
@@ -49,7 +49,7 @@ RUN ln -sf \
 
 # ---
 
-FROM ubuntu:latest AS runtime
+FROM ubuntu:22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
