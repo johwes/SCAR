@@ -26,6 +26,11 @@ RUN dnf install -y dnf-plugins-core \
     tbb-devel \
  && dnf clean all
 
+# tbb-devel on CentOS Stream 9 installs headers to /usr/include/tbb/ but
+# IKOS's FindTBB.cmake looks for the oneTBB layout at /usr/include/oneapi/tbb/
+RUN mkdir -p /usr/include/oneapi \
+ && ln -sf /usr/include/tbb /usr/include/oneapi/tbb
+
 RUN git clone --depth=1 --branch v${IKOS_VERSION} \
     https://github.com/NASA-SW-VnV/ikos.git /src/ikos
 
