@@ -72,7 +72,8 @@ def run(
         f"Source:\n```c\n{source}\n```"
     )
 
-    for _ in range(rounds):
+    for i in range(rounds):
+        print(f"    [triage round {i+1}/{rounds}] reviewing...", flush=True)
         prior_text = "\n\n---\n".join(prior) if prior else "None yet."
         user_content = (
             f"{base_context}\n\nPrior reasoning:\n{prior_text}"
@@ -92,9 +93,12 @@ def run(
 
         prior.append(response)
         match = _VERDICT_RE.search(response)
-        verdicts.append(match.group(1) if match else "UNCERTAIN")
+        verdict = match.group(1) if match else "UNCERTAIN"
+        verdicts.append(verdict)
+        print(f"    [triage round {i+1}/{rounds}] {verdict}", flush=True)
 
     # Arbiter round
+    print(f"    [arbiter] issuing final verdict...", flush=True)
     arbiter_input = (
         f"{base_context}\n\nAll prior reasoning:\n" + "\n\n---\n".join(prior)
     )

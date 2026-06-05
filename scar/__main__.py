@@ -27,22 +27,30 @@ def main() -> None:
 
     for finding in findings:
         source = finding.file_path
-        print(f"[scar] Processing {finding.rule_id} @ {source}:{finding.line}")
+        print(f"\n[scar] ── {finding.rule_id} @ {source}:{finding.line} ──")
+        print(f"  {finding.message}")
 
+        print(f"  [1/3] Generating security briefing...")
         briefing = context_gen.generate(source, args.repo)
-        patch = patch_gen.generate(finding, briefing, source)
+        print(f"  [1/3] Briefing ready ({len(briefing)} chars)")
 
+        print(f"  [2/3] Synthesising patch...")
+        patch = patch_gen.generate(finding, briefing, source)
+        print(f"  [2/3] Patch ready ({len(patch.splitlines())} lines)")
+
+        print(f"  [3/3] Validating patch...")
         val = validator.validate(patch, source)
         if not val.passed:
             print(f"  [skip] Validation failed ({val.stage}): {val.detail}")
             continue
+        print(f"  [3/3] Validation passed — running triage ({args.triage_rounds} rounds)")
 
         result = triage.run(finding, patch, source, args.repo, rounds=args.triage_rounds)
-        print(f"  [triage] {result.verdict} confidence={result.confidence:.2f} chain={result.chain}")
+        print(f"  [triage] verdict={result.verdict} confidence={result.confidence:.2f} chain={result.chain}")
 
         if result.verdict == "VALID" and result.confidence >= args.min_confidence:
             accepted.append({"finding": finding.__dict__, "patch": patch, "triage": result.__dict__})
-            print(f"  [accept] Patch accepted")
+            print(f"  [accept] {result.reason}")
         else:
             print(f"  [reject] {result.reason}")
 
