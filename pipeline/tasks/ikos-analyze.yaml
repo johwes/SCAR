@@ -3,10 +3,10 @@ kind: Task
 metadata:
   name: scar-ikos-analyze
 spec:
-  description: Run NASA IKOS on the combined LLVM bitcode and emit a SARIF report.
+  description: Run NASA IKOS on each LLVM bitcode file and emit a merged SARIF report.
   workspaces:
     - name: source
-      description: Shared workspace; reads .scar/combined.bc, writes .scar/results.sarif
+      description: Shared workspace; reads .scar/bitcode/*.bc, writes .scar/results.sarif
   steps:
     - name: ikos
       image: quay.io/jwesterl/scar-ikos:latest
@@ -14,19 +14,41 @@ spec:
         #!/bin/bash
         set -euo pipefail
         WS=$(workspaces.source.path)
-        BC="$WS/.scar/combined.bc"
-        DB="$WS/.scar/output.db"
-        SARIF="$WS/.scar/results.sarif"
+        BCDIR="$WS/.scar/bitcode"
+        SARIF_DIR="$WS/.scar/sarif"
+        mkdir -p "$SARIF_DIR"
 
-        ikos \
-          --entry-points=main \
-          --analyses=boa,dbz,nullity \
-          --output-db="$DB" \
-          "$BC"
+        find "$BCDIR" -name "*.bc" | while read -r bc; do
+          name="$(basename "${bc%.bc}")"
+          db="$WS/.scar/${name}.db"
+          sarif="$SARIF_DIR/${name}.sarif"
 
-        # Convert IKOS SQLite DB to SARIF via bundled converter
-        ikos-report --format=sarif "$DB" > "$SARIF"
-        echo "SARIF written to $SARIF"
+          echo "analyzing: $bc"
+          ikos \
+            --entry-points=main \
+            --analyses=boa,dbz,nullity \
+            --output-db="$db" \
+            "$bc" || true  # continue on analysis errors
+
+          ikos-report --format=sarif "$db" > "$sarif"
+          echo "  -> $sarif"
+        done
+
+        # Merge all per-file SARIF into one results.sarif
+        python3 - <<'PYEOF'
+import json, glob, os
+
+sarif_dir = os.environ.get("SARIF_DIR", "/workspace/source/.scar/sarif")
+out_path  = "/workspace/source/.scar/results.sarif"
+
+merged = {"version": "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json", "runs": []}
+for f in sorted(glob.glob(f"{sarif_dir}/*.sarif")):
+    data = json.load(open(f))
+    merged["runs"].extend(data.get("runs", []))
+
+json.dump(merged, open(out_path, "w"), indent=2)
+print(f"Merged {len(merged['runs'])} IKOS run(s) -> {out_path}")
+PYEOF
 
     - name: cppcheck
       image: quay.io/jwesterl/scar-ikos:latest
@@ -35,7 +57,6 @@ spec:
         set -euo pipefail
         WS=$(workspaces.source.path)
 
-        # Fast pre-scan; findings merged into the same SARIF workspace dir
         cppcheck \
           --enable=warning,portability \
           --output-file="$WS/.scar/cppcheck.sarif" \
