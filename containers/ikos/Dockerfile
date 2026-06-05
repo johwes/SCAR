@@ -23,6 +23,7 @@ RUN dnf install -y dnf-plugins-core \
     zlib-devel \
     libedit-devel \
     python3-devel \
+    tbb-devel \
  && dnf clean all
 
 RUN git clone --depth=1 --branch v${IKOS_VERSION} \
@@ -48,6 +49,7 @@ RUN dnf install -y dnf-plugins-core \
     gmp \
     boost-filesystem \
     boost-thread \
+    tbb \
     python3 \
  && dnf clean all
 
