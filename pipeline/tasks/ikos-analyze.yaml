@@ -63,7 +63,6 @@ spec:
 
         cppcheck \
           --enable=warning,portability \
-          --output-file="$WS/.scar/cppcheck.sarif" \
-          --output-format=sarif \
-          "$WS"
-        echo "Cppcheck SARIF written to .scar/cppcheck.sarif"
+          --xml \
+          "$WS" 2>"$WS/.scar/cppcheck.xml" || true
+        echo "Cppcheck XML written to .scar/cppcheck.xml"
