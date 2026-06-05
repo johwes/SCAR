@@ -24,12 +24,7 @@ spec:
   tasks:
     - name: clone
       taskRef:
-        resolver: cluster
-        params:
-          - name: kind
-            value: task
-          - name: name
-            value: git-clone
+        name: git-clone
       workspaces:
         - name: output
           workspace: shared-data
