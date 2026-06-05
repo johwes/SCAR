@@ -15,25 +15,25 @@ spec:
   workspaces:
     - name: source
       description: Shared workspace with C source and .scar/ analysis artifacts
-  env:
-    - name: LLM_BASE_URL
-      valueFrom:
-        secretKeyRef:
-          name: scar-llm-credentials
-          key: base_url
-    - name: LLM_API_KEY
-      valueFrom:
-        secretKeyRef:
-          name: scar-llm-credentials
-          key: api_key
-    - name: LLM_MODEL
-      valueFrom:
-        secretKeyRef:
-          name: scar-llm-credentials
-          key: model
   steps:
     - name: repair
       image: quay.io/jwesterl/scar-agent:latest
+      env:
+        - name: LLM_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: scar-llm-credentials
+              key: base_url
+        - name: LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: scar-llm-credentials
+              key: api_key
+        - name: LLM_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: scar-llm-credentials
+              key: model
       script: |
         #!/bin/bash
         set -euo pipefail
