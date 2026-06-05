@@ -64,4 +64,11 @@ class IkosSarifBridge:
             uri = uri[7:]
         if os.path.isabs(uri):
             return uri
+        candidate = self.repo_root / uri
+        if candidate.exists():
+            return str(candidate)
+        # IKOS reports paths relative to its working directory (workspace parent)
+        candidate = self.repo_root.parent / uri
+        if candidate.exists():
+            return str(candidate)
         return str(self.repo_root / uri)
