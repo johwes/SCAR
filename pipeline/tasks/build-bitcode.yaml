@@ -13,7 +13,7 @@ spec:
       description: Shared workspace containing the target C repository
   steps:
     - name: emit-llvm
-      image: quay.io/your-org/scar-ikos:latest
+      image: quay.io/jwesterl/scar-ikos:latest
       script: |
         #!/bin/bash
         set -euo pipefail

@@ -1,5 +1,5 @@
 REGISTRY ?= quay.io
-ORG      ?= your-org
+ORG      ?= jwesterl
 TAG      ?= latest
 
 IKOS_IMAGE  := $(REGISTRY)/$(ORG)/scar-ikos:$(TAG)

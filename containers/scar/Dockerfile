@@ -1,16 +1,17 @@
 # SCAR agent container
-# Provides: Python 3.11, scar package, ripgrep, patch
+# Provides: Python 3.10, scar package, ripgrep, patch, clang
 
-FROM quay.io/centos/centos:stream9
+FROM ubuntu:22.04
 
-RUN dnf install -y dnf-plugins-core epel-release \
- && dnf install -y \
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     ripgrep \
     patch \
-    clang \
- && dnf clean all
+    clang-14 \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY pyproject.toml .

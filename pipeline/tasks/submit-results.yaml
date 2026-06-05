@@ -8,7 +8,7 @@ spec:
     - name: source
   steps:
     - name: summarise
-      image: quay.io/your-org/scar-agent:latest
+      image: quay.io/jwesterl/scar-agent:latest
       script: |
         #!/bin/bash
         set -euo pipefail
