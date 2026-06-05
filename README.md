@@ -38,6 +38,9 @@ Active checkers:
 | `boa` | CWE-121, CWE-125 | Buffer overflow / out-of-bounds array access |
 | `dbz` | CWE-369 | Divide by zero |
 | `nullity` | CWE-476 | Null pointer dereference |
+| `uva` | CWE-457 | Read of uninitialized variable |
+| `sio` | CWE-190 | Signed integer overflow (undefined behaviour in C) |
+| `dfa` | CWE-415, CWE-416 | Double free and use-after-free |
 
 cppcheck runs alongside IKOS as a supplementary pass (output stored as `.scar/cppcheck.xml`).
 
@@ -60,6 +63,9 @@ cppcheck runs alongside IKOS as a supplementary pass (output stored as `.scar/cp
 | `oob_read.c` | CWE-125 | `boa` |
 | `divzero.c` | CWE-369 | `dbz` |
 | `nullderef.c` | CWE-476 | `nullity` |
+| `uninit.c` | CWE-457 | `uva` |
+| `signedoverflow.c` | CWE-190 | `sio` |
+| `doublefree.c` | CWE-415 | `dfa` |
 
 ## Configuration
 
