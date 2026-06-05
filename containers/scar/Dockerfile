@@ -1,18 +1,22 @@
 # SCAR agent container
 # Provides: Python 3.11, scar package, ripgrep, patch
-FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+FROM quay.io/centos/centos:stream9
+
+RUN dnf install -y dnf-plugins-core epel-release \
+ && dnf install -y \
+    python3 \
+    python3-pip \
     ripgrep \
     patch \
     clang \
-    && rm -rf /var/lib/apt/lists/*
+ && dnf clean all
 
 WORKDIR /app
 COPY pyproject.toml .
 COPY scar/ scar/
 
-RUN pip install --no-cache-dir -e .
+RUN pip3 install --no-cache-dir -e .
 
 WORKDIR /workspace
-ENTRYPOINT ["python", "-m", "scar"]
+ENTRYPOINT ["python3", "-m", "scar"]
