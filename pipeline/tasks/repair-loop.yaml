@@ -33,7 +33,7 @@ spec:
           key: model
   steps:
     - name: repair
-      image: ghcr.io/your-org/scar-agent:latest
+      image: quay.io/your-org/scar-agent:latest
       script: |
         #!/bin/bash
         set -euo pipefail
