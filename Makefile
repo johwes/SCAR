@@ -10,10 +10,10 @@ AGENT_IMAGE := $(REGISTRY)/$(ORG)/scar-agent:$(TAG)
 build: build-ikos build-agent
 
 build-ikos:
-	docker build -t $(IKOS_IMAGE) containers/ikos/
+	docker build --no-cache -t $(IKOS_IMAGE) containers/ikos/
 
 build-agent:
-	docker build -t $(AGENT_IMAGE) containers/scar/
+	docker build --no-cache -t $(AGENT_IMAGE) containers/scar/
 
 push: push-ikos push-agent
 

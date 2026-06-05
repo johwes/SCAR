@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libedit-dev \
     python3 \
     python3-pip \
+    python3-setuptools \
     llvm-14 \
     llvm-14-dev \
     llvm-14-tools \
