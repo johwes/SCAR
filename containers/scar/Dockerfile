@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     patch \
     clang-14 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 14
 
 WORKDIR /app
 COPY pyproject.toml .
