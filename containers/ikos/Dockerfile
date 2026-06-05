@@ -65,6 +65,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgmpxx4ldbl \
     libboost-filesystem1.74.0 \
     libboost-thread1.74.0 \
+    libboost-program-options1.74.0 \
+    zlib1g \
+    libedit2 \
     libtbb12 \
     python3 \
  && rm -rf /var/lib/apt/lists/* \
