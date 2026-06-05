@@ -1,9 +1,9 @@
 # IKOS analysis container — multi-stage build
-# Builder follows the steps from IKOS's own upstream CI (ubuntu/llvm-14)
+# Builder follows the steps from IKOS's own upstream CI (ubuntu:latest/llvm-14)
 # Stage 1: build IKOS from source
 # Stage 2: runtime image with IKOS binary + cppcheck
 
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:latest AS builder
 
 ARG IKOS_VERSION=3.5
 ENV DEBIAN_FRONTEND=noninteractive
@@ -42,9 +42,14 @@ RUN cmake -S /src/ikos -B /build/ikos \
  && cmake --build /build/ikos \
  && cmake --install /build/ikos
 
+# Create a stable symlink so PYTHONPATH doesn't need to know the Python version
+RUN ln -sf \
+    "$(find /opt/ikos/libexec/lib -maxdepth 1 -name 'python3.*' -type d | head -1)/site-packages" \
+    /opt/ikos/site-packages
+
 # ---
 
-FROM ubuntu:22.04 AS runtime
+FROM ubuntu:latest AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -64,10 +69,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && update-alternatives --install /usr/bin/llvm-link llvm-link /usr/bin/llvm-link-14 14
 
 COPY --from=builder /opt/ikos /opt/ikos
+
 ENV PATH="/opt/ikos/bin:$PATH"
-# IKOS is a Python wrapper — set PYTHONPATH based on the installed Python version
-RUN PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") \
- && echo "PYTHONPATH=/opt/ikos/libexec/lib/python${PYVER}/site-packages" >> /etc/environment
-ENV PYTHONPATH=/opt/ikos/libexec/lib/python3.10/site-packages
+ENV PYTHONPATH="/opt/ikos/site-packages"
 
 WORKDIR /workspace
