@@ -1,0 +1,44 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-ikos-analyze
+spec:
+  description: Run NASA IKOS on the combined LLVM bitcode and emit a SARIF report.
+  workspaces:
+    - name: source
+      description: Shared workspace; reads .scar/combined.bc, writes .scar/results.sarif
+  steps:
+    - name: ikos
+      image: ghcr.io/your-org/scar-ikos:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+        BC="$WS/.scar/combined.bc"
+        DB="$WS/.scar/output.db"
+        SARIF="$WS/.scar/results.sarif"
+
+        ikos \
+          --entry-points=main \
+          --analyses=boa,dbz,nullity \
+          --output-db="$DB" \
+          "$BC"
+
+        # Convert IKOS SQLite DB to SARIF via bundled converter
+        ikos-report --format=sarif "$DB" > "$SARIF"
+        echo "SARIF written to $SARIF"
+
+    - name: cppcheck
+      image: ghcr.io/your-org/scar-ikos:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+
+        # Fast pre-scan; findings merged into the same SARIF workspace dir
+        cppcheck \
+          --enable=warning,portability \
+          --output-file="$WS/.scar/cppcheck.sarif" \
+          --output-format=sarif \
+          "$WS"
+        echo "Cppcheck SARIF written to .scar/cppcheck.sarif"

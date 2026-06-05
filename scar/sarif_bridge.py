@@ -1,0 +1,67 @@
+"""IKOS SARIF bridge.
+
+Parses the SARIF JSON produced by IKOS and yields structured bug candidates
+for downstream LLM processing.
+"""
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class Finding:
+    rule_id: str
+    severity: str
+    file_path: str
+    line: int
+    column: int
+    message: str
+
+
+class IkosSarifBridge:
+    def __init__(self, sarif_path: str | Path, repo_root: str | Path):
+        self.sarif_path = Path(sarif_path)
+        self.repo_root = Path(repo_root)
+
+    def parse(self) -> list[Finding]:
+        if not self.sarif_path.exists():
+            raise FileNotFoundError(f"SARIF report not found: {self.sarif_path}")
+
+        with open(self.sarif_path) as fh:
+            data = json.load(fh)
+
+        findings: list[Finding] = []
+        for run in data.get("runs", []):
+            for result in run.get("results", []):
+                for finding in self._extract(result):
+                    findings.append(finding)
+        return findings
+
+    def _extract(self, result: dict) -> list[Finding]:
+        rule_id = result.get("ruleId", "unknown")
+        level = result.get("level", "warning")
+        message = result.get("message", {}).get("text", "")
+        findings = []
+
+        for location in result.get("locations", []):
+            phys = location.get("physicalLocation", {})
+            uri = phys.get("artifactLocation", {}).get("uri", "")
+            region = phys.get("region", {})
+            findings.append(Finding(
+                rule_id=rule_id,
+                severity=level,
+                file_path=self._resolve(uri),
+                line=region.get("startLine", 0),
+                column=region.get("startColumn", 0),
+                message=message,
+            ))
+        return findings
+
+    def _resolve(self, uri: str) -> str:
+        if uri.startswith("file://"):
+            uri = uri[7:]
+        if os.path.isabs(uri):
+            return uri
+        return str(self.repo_root / uri)
