@@ -42,6 +42,12 @@ RUN cmake -S /src/ikos -B /build/ikos \
  && cmake --build /build/ikos \
  && cmake --install /build/ikos
 
+# Diagnostic: show where IKOS installed Python files
+RUN echo "=== /opt/ikos tree ===" \
+ && find /opt/ikos -name "*.py" | head -40 \
+ && echo "=== libexec/lib contents ===" \
+ && ls -al /opt/ikos/libexec/lib/ 2>/dev/null || echo "(libexec/lib missing)"
+
 # Create a stable symlink so PYTHONPATH doesn't need to know the Python version
 RUN ln -sf \
     "$(find /opt/ikos/libexec/lib -maxdepth 1 -name 'python3.*' -type d | head -1)/site-packages" \
