@@ -32,5 +32,6 @@ spec:
           echo "bitcode: $bc"
         done
 
-        llvm-link "$OUT"/**/*.bc -o "$(workspaces.source.path)/.scar/combined.bc"
+        mapfile -t BCFILES < <(find "$OUT" -name "*.bc")
+        llvm-link "${BCFILES[@]}" -o "$(workspaces.source.path)/.scar/combined.bc"
         echo "linked bitcode: .scar/combined.bc"
