@@ -10,7 +10,8 @@ from . import context_gen, patch_gen, triage, validator
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SCAR — Static C Analysis & Repair")
+    parser = argparse.ArgumentParser(prog="scar", description="SCAR — Static C Analysis & Repair")
+    parser.add_argument("--version", action="version", version="scar 0.1.0")
     parser.add_argument("sarif", help="Path to IKOS SARIF output file")
     parser.add_argument("repo", help="Repository root directory")
     parser.add_argument("--triage-rounds", type=int, default=5)
