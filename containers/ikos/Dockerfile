@@ -37,6 +37,7 @@ RUN git clone --depth=1 --branch v${IKOS_VERSION} \
 RUN cmake -S /src/ikos -B /build/ikos \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/opt/ikos \
+    -DTBB_ROOT=/usr \
   && cmake --build /build/ikos --parallel "$(nproc)" \
   && cmake --install /build/ikos
 
