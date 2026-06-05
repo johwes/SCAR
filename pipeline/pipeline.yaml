@@ -36,9 +36,9 @@ spec:
         - name: output
           workspace: shared-data
       params:
-        - name: url
+        - name: URL
           value: $(params.repo-url)
-        - name: revision
+        - name: REVISION
           value: $(params.revision)
 
     - name: build-bitcode
