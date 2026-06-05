@@ -39,7 +39,7 @@ spec:
         set -euo pipefail
         WS=$(workspaces.source.path)
 
-        python3 -m scar \
+        python3 -u -m scar \
           "$WS/.scar/results.sarif" \
           "$WS" \
           --triage-rounds=$(params.triage-rounds) \
