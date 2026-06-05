@@ -60,10 +60,18 @@ spec:
         - name: source
           workspace: shared-data
 
+    - name: llm-scan
+      taskRef:
+        name: scar-llm-scan
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+
     - name: repair-loop
       taskRef:
         name: scar-repair-loop
-      runAfter: [ikos-analyze]
+      runAfter: [ikos-analyze, llm-scan]
       workspaces:
         - name: source
           workspace: shared-data

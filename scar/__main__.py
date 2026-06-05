@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .sarif_bridge import IkosSarifBridge, Finding
-from . import context_gen, patch_gen, triage, validator, vuln_scan
+from . import context_gen, patch_gen, triage, validator
 
 
 def main() -> None:
@@ -19,38 +19,33 @@ def main() -> None:
     parser.add_argument("--output", default="scar-results.json")
     args = parser.parse_args()
 
-    # ── Stage 0: IKOS findings ──────────────────────────────────────────────
+    # ── IKOS findings ────────────────────────────────────────────────────────
     bridge = IkosSarifBridge(args.sarif, args.repo)
     ikos_findings = bridge.parse()
-    print(f"[scar] {len(ikos_findings)} findings from IKOS", flush=True)
+    print(f"[scar] {len(ikos_findings)} finding(s) from IKOS", flush=True)
 
     ikos_locations = {(f.file_path, f.line) for f in ikos_findings}
 
-    # ── Stage 2: LLM vulnerability scan (nano-analyzer style) ───────────────
-    c_files = sorted(Path(args.repo).rglob("*.c"))
-    print(f"[scar] LLM vulnerability scan on {len(c_files)} C file(s)...", flush=True)
-
+    # ── LLM scan findings (written by parallel scar-llm-scan task) ──────────
+    llm_findings_path = Path(args.repo) / ".scar" / "llm-findings.json"
     llm_findings: list[Finding] = []
-    briefing_cache: dict[str, str] = {}
-
-    for c_file in c_files:
-        print(f"  [llm-scan] {c_file.name}", flush=True)
-        briefing = context_gen.generate(str(c_file), args.repo)
-        briefing_cache[str(c_file)] = briefing
-
-        for lf in vuln_scan.scan(str(c_file), briefing, args.repo):
-            if (lf.file_path, lf.line) in ikos_locations:
-                continue  # IKOS already has this location covered
+    if llm_findings_path.exists():
+        raw = json.loads(llm_findings_path.read_text())
+        for item in raw:
+            loc = (item["file_path"], item["line"])
+            if loc in ikos_locations:
+                continue  # IKOS already covers this location
             llm_findings.append(Finding(
-                rule_id=lf.title,
-                severity=lf.severity,
-                file_path=lf.file_path,
-                line=lf.line,
-                column=0,
-                message=lf.description,
+                rule_id=item["rule_id"],
+                severity=item["severity"],
+                file_path=item["file_path"],
+                line=item["line"],
+                column=item.get("column", 0),
+                message=item["message"],
             ))
-
-    print(f"[scar] {len(llm_findings)} additional finding(s) from LLM scan", flush=True)
+        print(f"[scar] {len(llm_findings)} additional finding(s) from LLM scan", flush=True)
+    else:
+        print(f"[scar] no LLM scan results found (llm-findings.json missing)", flush=True)
 
     all_findings = ikos_findings + llm_findings
     print(f"[scar] {len(all_findings)} total finding(s) to process", flush=True)
@@ -65,7 +60,7 @@ def main() -> None:
         print(f"  {finding.message}", flush=True)
 
         print(f"  [1/3] Generating security briefing...", flush=True)
-        briefing = briefing_cache.get(source) or context_gen.generate(source, args.repo)
+        briefing = context_gen.generate(source, args.repo)
         print(f"  [1/3] Briefing ready ({len(briefing)} chars)", flush=True)
 
         print(f"  [2/3] Synthesising patch...", flush=True)
