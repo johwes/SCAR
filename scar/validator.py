@@ -4,7 +4,9 @@ Enforces embedded safety rules via regex before triggering compilation,
 then compiles the patched source with native clang to confirm it builds.
 """
 
+import json
 import re
+import shlex
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -22,11 +24,11 @@ class ValidationResult:
     detail: str
 
 
-def validate(patch: str, source_path: str | Path) -> ValidationResult:
+def validate(patch: str, source_path: str | Path, repo_root: str | Path | None = None) -> ValidationResult:
     result = _check_safety_rules(patch)
     if not result.passed:
         return result
-    return _check_compilation(patch, Path(source_path))
+    return _check_compilation(patch, Path(source_path), Path(repo_root) if repo_root else None)
 
 
 def _check_safety_rules(patch: str) -> ValidationResult:
@@ -42,31 +44,53 @@ def _check_safety_rules(patch: str) -> ValidationResult:
     return ValidationResult(True, "safety", "All safety rules passed")
 
 
-def _check_compilation(patch: str, source_path: Path) -> ValidationResult:
+def _check_compilation(patch: str, source_path: Path, repo_root: Path | None = None) -> ValidationResult:
     source = source_path.read_text(encoding="utf-8", errors="replace")
 
     patched = _apply_patch(source, patch, source_path.name)
     if patched is None:
         return ValidationResult(False, "patch_apply", "Unified diff failed to apply cleanly")
 
+    flags = _compile_flags(source_path, repo_root)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / source_path.name
         out.write_text(patched, encoding="utf-8")
-
-        # Include the source file's parent directory so local headers resolve.
-        # For projects with compile_commands.json the caller should supply
-        # precise -I flags; this is the best-effort fallback.
-        cmd = [
-            "clang", "-c", "-x", "c", "-O0", "-Wall",
-            f"-I{source_path.parent}",
-            "-o", "/dev/null",
-            str(out),
-        ]
+        cmd = ["clang", "-c", "-x", "c", "-O0", "-Wall"] + flags + ["-o", "/dev/null", str(out)]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if proc.returncode != 0:
             return ValidationResult(False, "compile", proc.stderr[:500])
 
     return ValidationResult(True, "ok", "Compiled successfully")
+
+
+def _compile_flags(source_path: Path, repo_root: Path | None) -> list[str]:
+    """Return compiler flags for source_path, sourced from compile_commands.json when available."""
+    if repo_root:
+        ccdb_path = repo_root / ".scar" / "compile_commands.json"
+        if ccdb_path.exists():
+            try:
+                entries = json.loads(ccdb_path.read_text())
+                resolved = source_path.resolve()
+                for entry in entries:
+                    if Path(entry["file"]).resolve() == resolved:
+                        parts = shlex.split(entry.get("command", ""))
+                        flags: list[str] = []
+                        i = 0
+                        while i < len(parts):
+                            p = parts[i]
+                            if p in ("-I", "-D", "-isystem", "-iquote"):
+                                flags += [p, parts[i + 1]]
+                                i += 2
+                            elif p.startswith(("-I", "-D", "-isystem", "-iquote", "-std=")):
+                                flags.append(p)
+                                i += 1
+                            else:
+                                i += 1
+                        return flags
+            except Exception:
+                pass
+    return [f"-I{source_path.parent}"]
 
 
 def _apply_patch(source: str, patch: str, filename: str) -> str | None:

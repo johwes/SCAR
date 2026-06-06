@@ -68,7 +68,7 @@ def main() -> None:
         print(f"  [2/3] Patch ready ({len(patch.splitlines())} lines)", flush=True)
 
         print(f"  [3/3] Validating patch...", flush=True)
-        val = validator.validate(patch, source)
+        val = validator.validate(patch, source, repo_root=args.repo)
         if not val.passed:
             print(f"  [skip] Validation failed ({val.stage}): {val.detail}", flush=True)
             continue

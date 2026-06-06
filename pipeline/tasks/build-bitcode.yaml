@@ -19,8 +19,27 @@ spec:
         set -euo pipefail
         SRC=$(workspaces.source.path)/$(params.source-dir)
         OUT=$(workspaces.source.path)/.scar/bitcode
+        CCDB=$(workspaces.source.path)/.scar/compile_commands.json
 
         mkdir -p "$OUT"
+
+        # Generate compile_commands.json so the validator can use exact per-file flags.
+        if [ -f "$SRC/CMakeLists.txt" ]; then
+          echo "Detected CMakeLists.txt — extracting compile commands via cmake"
+          cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B "$OUT/cmake-build" "$SRC" 2>&1 | tail -3 || true
+          if [ -f "$OUT/cmake-build/compile_commands.json" ]; then
+            cp "$OUT/cmake-build/compile_commands.json" "$CCDB"
+            echo "compile_commands.json generated from CMake ($(wc -l < "$CCDB") lines)"
+          fi
+        elif [ -f "$SRC/Makefile" ]; then
+          echo "Detected Makefile — capturing compile commands via bear"
+          cd "$SRC" && bear --output "$CCDB" -- make 2>&1 | tail -3 || true
+          if [ -f "$CCDB" ]; then
+            echo "compile_commands.json generated from bear+make ($(wc -l < "$CCDB") lines)"
+          fi
+        else
+          echo "No build system detected — validator will use -I parent fallback"
+        fi
 
         find "$SRC" -name "*.c" | while read -r f; do
           rel="${f#$SRC/}"
