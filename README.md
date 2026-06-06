@@ -6,33 +6,35 @@ Autonomous CVE scanning and patch generation for C codebases, orchestrated via O
 
 ```
 C source (x86)
-  └─> clang -emit-llvm → .bc              [Task: build-bitcode]
-        ├─> IKOS → SARIF                   [Task: ikos-analyze]  ─┐
-        └─> LLM vulnerability scan         [Task: llm-scan]      ─┤ (parallel)
-                                                                   ↓
-              Stage 1: Context Gen  ─┐                    [Task: repair-loop]
-              Stage 2: Patch         ├────────────────────────────┘
-              Stage 3: Triage + Validator
-                    └─> accepted patches                  [Task: submit-results]
+  └─> build system detection → compile_commands.json  [Task: build-bitcode]
+  └─> clang -emit-llvm → .bc                          [Task: build-bitcode]
+        ├─> IKOS → SARIF + output.db          [Task: ikos-analyze]  ─┐
+        └─> LLM vulnerability scan            [Task: llm-scan]      ─┤ (parallel)
+                                                                      ↓
+              Stage 1: Context Gen + IKOS witness trace  ─┐  [Task: repair-loop]
+              Stage 2: Patch Gen                          ─┤
+              Stage 3: Validate + Triage                  ┘
+                    └─> accepted patches              [Task: submit-results]
 ```
 
-IKOS and the LLM scan run in parallel after bitcode compilation. The repair-loop
-merges both result sets, deduplicates by file+line, and processes each finding
-through the three-stage LLM repair pipeline.
+`ikos-analyze` and `llm-scan` run in parallel after bitcode compilation. The repair
+loop merges all finding sources, deduplicates with a ±3-line sliding window, and
+drives each finding through the three-stage LLM repair pipeline.
 
 ## Components
 
 | Module | Role |
 |---|---|
 | `scar/sarif_bridge.py` | Parses IKOS SARIF output into structured findings |
-| `scar/context_gen.py` | Generates a security briefing per file (nano-analyzer Stage 1) |
+| `scar/ikos_witness.py` | Queries IKOS `output.db` (SQLite) for counterexample witness traces |
+| `scar/context_gen.py` | Security briefing per file, enriched with grep results and IKOS witness traces |
 | `scar/vuln_scan.py` | LLM-driven vulnerability discovery (nano-analyzer Stage 2) |
 | `scar/scan_cmd.py` | Entry point for the `scar-llm-scan` Tekton task |
 | `scar/patch_gen.py` | Synthesises a unified diff patch via LLM |
 | `scar/triage.py` | Multi-round skeptical triage + Arbiter verdict (nano-analyzer Stage 3) |
-| `scar/validator.py` | Enforces MISRA safety rules and verifies compilation |
+| `scar/validator.py` | Enforces MISRA safety rules and verifies compilation via `compile_commands.json` |
 | `scar/grep_tool.py` | Agentic grep — lets the LLM resolve `#define` constants across the repo |
-| `scar/llm.py` | OpenAI-compatible client (works with LiteLLM, OpenAI, OpenRouter, vLLM) |
+| `scar/llm.py` | OpenAI-compatible client (LiteLLM, OpenAI, OpenRouter, vLLM) |
 
 ## Two scanning approaches
 
@@ -51,9 +53,59 @@ through the three-stage LLM repair pipeline.
 
 cppcheck runs alongside IKOS as a supplementary pass (output stored as `.scar/cppcheck.xml`).
 
+IKOS also writes `output.db` — a SQLite database containing the abstract interval
+state at each flagged statement. SCAR reads this via `ikos_witness.py` and injects
+the counterexample trace (checker, status, call context) into the context generation
+prompt, giving the LLM proven execution data rather than requiring it to re-derive
+the path from source alone.
+
 ### LLM vulnerability scan (broad)
 
-Inspired by [nano-analyzer](https://github.com/weareaisle/nano-analyzer), the LLM scan runs independently on every C file, hunting for bug classes IKOS cannot model: string function overflows, type confusion, logic errors, and protocol-level bugs. Findings are few-shot prompted, then deduplicated against IKOS results before entering the repair loop. Each accepted patch is tagged `[ikos]` or `[llm]` to indicate its origin.
+Inspired by [nano-analyzer](https://github.com/weareaisle/nano-analyzer), the LLM scan
+runs independently on every C file, hunting for bug classes IKOS cannot model: string
+function overflows, type confusion, logic errors, and protocol-level bugs. Findings are
+few-shot prompted, then deduplicated against IKOS results before entering the repair loop.
+Each accepted patch is tagged `[ikos]` or `[llm]` to indicate its origin.
+
+## Build system support
+
+`build-bitcode` automatically detects the project's build system and generates
+`compile_commands.json` so the validator uses exact per-file compiler flags:
+
+| Detected file | Action |
+|---|---|
+| `CMakeLists.txt` | `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (no full build needed) |
+| `Makefile` | `bear -- make` intercepts compiler calls |
+| `build.sh` | OSS-Fuzz compatible — runs with `bear` and standard env vars (`$CC`, `$CFLAGS`, `$SRC`, `$WORK`, `$OUT`) |
+| none | Falls back to `-I <source_parent>` heuristic |
+
+This enables SCAR to scan any project in the [OSS-Fuzz](https://github.com/google/oss-fuzz)
+corpus (1,000+ open-source C projects) without per-project configuration.
+
+## Pluggable findings convention
+
+Any Tekton task can contribute findings to the repair loop by writing a file matching
+`.scar/findings-<name>.json` using this schema:
+
+```json
+[
+  {
+    "rule_id": "CWE-121",
+    "severity": "high",
+    "file_path": "/workspace/source/src/input.c",
+    "line": 12,
+    "column": 0,
+    "message": "strcpy into fixed-size buffer without length check"
+  }
+]
+```
+
+The repair loop discovers all `findings-*.json` files automatically — no Python changes
+needed when a new analyzer or fuzzer is added to the pipeline. To add a new tool:
+
+1. Write a Tekton Task that produces `.scar/findings-<name>.json`
+2. Add it to `pipeline.yaml` with `runAfter: [build-bitcode]`
+3. Add it to the `runAfter` list on `repair-loop`
 
 ## What SCAR does not find
 
@@ -63,7 +115,11 @@ Inspired by [nano-analyzer](https://github.com/weareaisle/nano-analyzer), the LL
 
 ## Test corpus
 
-[`johwes/scar-test-c`](https://github.com/johwes/scar-test-c) — minimal C files, one vulnerability each, covering all active checkers:
+[`johwes/scar-test-c`](https://github.com/johwes/scar-test-c) — two test targets:
+
+### Single-file (root of repo)
+
+Minimal C files, one vulnerability each, covering all active checkers:
 
 | File | CWE | IKOS | LLM scan |
 |---|---|---|---|
@@ -74,6 +130,19 @@ Inspired by [nano-analyzer](https://github.com/weareaisle/nano-analyzer), the LL
 | `uninit.c` | CWE-457 | `uva` | detected |
 | `signedoverflow.c` | CWE-190 | `sio` | detected |
 | `doublefree.c` | CWE-415 | `dfa` | detected |
+
+### Multi-file (`multifile/`)
+
+Three source files sharing a common header (`include/common.h`), built via an
+OSS-Fuzz `build.sh`. Tests the full build system detection and `compile_commands.json`
+pipeline — without the `-Iinclude` flag captured by bear, all three patches would fail
+compilation.
+
+| File | CWE | IKOS | LLM scan |
+|---|---|---|---|
+| `src/input.c` | CWE-121 (`strcpy`) | not detected | detected |
+| `src/process.c` | CWE-476 | `nullity` | detected |
+| `src/output.c` | CWE-369 | `dbz` | detected |
 
 ## Configuration
 
@@ -86,8 +155,7 @@ oc create secret generic scar-llm-credentials \
   --from-literal=model="your-model-name"
 ```
 
-The three keys (`base_url`, `api_key`, `model`) are required. Any OpenAI-compatible
-endpoint works: LiteLLM proxy, OpenAI, OpenRouter, vLLM, etc.
+Any OpenAI-compatible endpoint works: LiteLLM proxy, OpenAI, OpenRouter, vLLM, etc.
 
 ## Running the Tekton Pipeline
 
@@ -99,9 +167,23 @@ oc apply -f pipeline/pipeline.yaml
 # Create a PVC for the shared workspace
 oc apply -f pipeline/pvc.yaml
 
-# Start a run
+# Build and push container images
+podman build -t quay.io/jwesterl/scar-ikos:latest containers/ikos/
+podman push quay.io/jwesterl/scar-ikos:latest
+
+podman build -t quay.io/jwesterl/scar-agent:latest containers/scar/
+podman push quay.io/jwesterl/scar-agent:latest
+
+# Run against the single-file test corpus
 tkn pipeline start scar \
   --param repo-url=https://github.com/johwes/scar-test-c \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --showlog
+
+# Run against the multi-file OSS-Fuzz example
+tkn pipeline start scar \
+  --param repo-url=https://github.com/johwes/scar-test-c \
+  --param source-dir=multifile \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 ```
@@ -123,6 +205,13 @@ scar results.sarif /path/to/repo \
 pip install -e ".[dev]"
 pytest
 ```
+
+## Improvements roadmap
+
+See [`IMPROVEMENTS.md`](IMPROVEMENTS.md) for a prioritised list of enhancements from
+low-hanging fruit (IKOS witness traces, macro expansion) through medium effort (caller
+context injection, RAG over accepted patches, parallel repair loop) to higher complexity
+(program slicing, cross-file data flow, reachability filtering).
 
 ## Benchmarks
 
