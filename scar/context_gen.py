@@ -7,7 +7,7 @@ data flows, and likely bug classes — reducing LLM hallucination in Stage 2.
 
 from pathlib import Path
 
-from . import llm, grep_tool
+from . import llm, grep_tool, ikos_witness
 
 CONTEXT_GEN_PROMPT = """\
 You are a security researcher preparing a briefing for a colleague who will \
@@ -27,8 +27,14 @@ If you need to resolve a macro or find a caller, emit: GREP: <pattern>
 """
 
 
-def generate(source_path: str | Path, repo_dir: str | Path) -> str:
-    """Return a security briefing for source_path, enriched with grep results."""
+def generate(
+    source_path: str | Path,
+    repo_dir: str | Path,
+    witness_db: Path | None = None,
+    finding_line: int | None = None,
+) -> str:
+    """Return a security briefing for source_path, enriched with grep results
+    and (when available) the IKOS counterexample witness trace."""
     source = Path(source_path).read_text(encoding="utf-8", errors="replace")
 
     messages = [
@@ -43,5 +49,10 @@ def generate(source_path: str | Path, repo_dir: str | Path) -> str:
         grep_results = grep_tool.execute(directives, repo_dir)
         if grep_results:
             briefing += f"\n\n--- Grep Results ---\n{grep_results}"
+
+    if witness_db is not None and finding_line is not None:
+        trace = ikos_witness.extract(witness_db, str(source_path), finding_line)
+        if trace:
+            briefing += f"\n\n--- IKOS Witness Trace ---\n{trace}"
 
     return briefing

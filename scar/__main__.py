@@ -67,7 +67,14 @@ def main() -> None:
         print(f"  {finding.message}", flush=True)
 
         print(f"  [1/3] Generating security briefing...", flush=True)
-        briefing = context_gen.generate(source, args.repo)
+        # Locate the IKOS witness db for this file (named after the .c basename)
+        stem = Path(source).stem
+        witness_db = Path(args.repo) / ".scar" / f"{stem}.db"
+        briefing = context_gen.generate(
+            source, args.repo,
+            witness_db=witness_db if witness_db.exists() else None,
+            finding_line=finding.line,
+        )
         print(f"  [1/3] Briefing ready ({len(briefing)} chars)", flush=True)
 
         print(f"  [2/3] Synthesising patch...", flush=True)
