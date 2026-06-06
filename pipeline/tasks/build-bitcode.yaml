@@ -65,10 +65,13 @@ spec:
           rel="${f#$SRC/}"
           bc="$BCDIR/${rel%.c}.bc"
           mkdir -p "$(dirname "$bc")"
-          clang -c -emit-llvm -g -O0 \
-            -Xclang -disable-O0-optnone \
-            "$f" -o "$bc"
-          echo "bitcode: $bc"
+          if clang -c -emit-llvm -g -O0 \
+               -Xclang -disable-O0-optnone \
+               "$f" -o "$bc" 2>/dev/null; then
+            echo "bitcode: $bc"
+          else
+            echo "skip: $f (missing headers — use source-dir= to scope to a sub-project with its own build system)"
+          fi
         done
 
         echo "bitcode compilation complete"
