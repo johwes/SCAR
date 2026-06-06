@@ -118,6 +118,49 @@ LLM triage — the patch is never actually applied and verified to fix the origi
 finding. Closing this loop would make acceptance criteria much stronger and catch
 cases where a syntactically valid patch does not actually eliminate the bug.
 
+### ESBMC integration as a findings source
+ESBMC (Efficient SMT-Based C Model Checker) compiles C to GOTO-IR and uses
+bounded model checking to generate concrete mathematical counterexamples: exact
+execution traces with input values that reproduce the bug. This is a stronger signal
+than IKOS abstract intervals — the LLM gets a proven crash path, not a range.
+ESBMC can be wired in as a Tekton task writing `.scar/findings-esbmc.json` via the
+pluggable findings convention, requiring no changes to the repair loop.
+The main constraint is path explosion: ESBMC's loop unwind bound `k` must be tuned
+per project. Start with `--unwind 5` and escalate on timeout.
+
+### Fuzzing integration (libAFL / AFL++)
+DARPA AIxCC first-place team (ATLANTIS) won using parallel fuzzing with libAFL,
+directed by LLM-generated seeds and concolic execution. Fuzzing finds bugs IKOS
+cannot reach (complex input-dependent paths, parser state machines) and produces
+concrete crash inputs (PoVs) that can be fed into the repair loop as findings.
+Wire as a Tekton task: run `afl-fuzz` or `libAFL` against an instrumented binary
+for a bounded time, convert crash inputs to findings using `afl-analyze`, write
+`.scar/findings-fuzzer.json`. The PoV file can additionally be used for re-scan
+verification after patch acceptance (see "Automated patch application and re-scan").
+
+---
+
+## Embedded / Cross-Compilation (Future Direction)
+
+### ARM cross-compilation target support
+SCAR currently analyses x86 bitcode only. Safety-critical embedded firmware
+(Zephyr, FreeRTOS, bare-metal Cortex-M) uses arm-none-eabi-gcc and cannot be
+compiled with native clang. The path:
+1. Inject `-save-temps=obj` into the cross-compiler command via bear interception,
+   producing preprocessed `.i` files (all macros, register definitions resolved).
+2. Re-compile each `.i` with target-configured clang:
+   `clang -c -emit-llvm -target arm-none-eabi -march=armv7e-m -mfloat-abi=hard
+    -mfpu=fpv4-sp-d16 -D__IKOS__ -g -O0 -Xclang -disable-O0-optnone file.i -o file.bc`
+3. Pass `--hardware-addresses` to IKOS so that MMIO pointer casts
+   (`*(volatile uint32_t *)0x4000C000`) are modelled as valid bounded regions
+   rather than flagged as null or out-of-bounds.
+4. IKOS volatile support is native — every volatile read yields an unconstrained
+   symbolic interval covering the full data type range, correctly modelling
+   asynchronous hardware register updates without false alarms.
+This enables SCAR to scan Zephyr BLE stack CVEs (e.g. CVE-2021-3434 stack overflow
+in `le_ecred_conn_req()`, CVE-2021-3432 divide-by-zero), FreeRTOS MPU bypass bugs,
+and the ENSBench suite of lwIP/FreeRTOS-TCP network stack vulnerabilities.
+
 ---
 
 ## Notes
@@ -128,3 +171,6 @@ cases where a syntactically valid patch does not actually eliminate the bug.
 - Reachability filtering and cross-file data flow are the approaches most responsible
   for the gap between demo-scale results and production-scale results on codebases
   like OpenSSL.
+- DARPA AIxCC results show fuzzing + LLM outperforms static-only approaches for
+  finding deep, input-dependent vulnerabilities. SCAR's pluggable findings convention
+  makes fuzzer integration straightforward without touching the repair loop.
