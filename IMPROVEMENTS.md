@@ -60,6 +60,15 @@ dependency graph from the call graph and only re-analyse:
 Makes CI integration practical at scale. Requires persisting the call graph and
 a mapping from file to its dependents between runs.
 
+### Parallel repair loop (per-file concurrency)
+The repair loop is single-threaded and processes each finding sequentially. For
+repos with many findings the LLM API calls dominate wall time and are naturally
+parallel. Safe model: group findings by `file_path` and process each group
+sequentially within a `ThreadPoolExecutor` worker — this keeps sibling temp-file
+names unique per thread and allows one `context_gen` briefing call per file
+instead of one per finding, halving LLM calls on multi-finding files. A
+`max_workers` cap (e.g. 4) prevents rate-limit 429s on the LLM endpoint.
+
 ### Patch dependency tracking
 When multiple findings exist in the same file, patches may conflict or one patch
 may render another redundant (as seen with the two `doublefree.c` patches — the
