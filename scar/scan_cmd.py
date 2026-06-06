@@ -13,14 +13,17 @@ from . import context_gen, vuln_scan
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("usage: python3 -m scar.scan_cmd <repo_dir>", file=sys.stderr)
+        print("usage: python3 -m scar.scan_cmd <repo_dir> [<source_dir>]", file=sys.stderr)
         sys.exit(1)
 
     repo = Path(sys.argv[1])
+    # Optional second arg scopes the scan to a subdirectory (e.g. source-dir=multifile).
+    # Findings still land in repo/.scar/ so the repair loop finds them regardless.
+    scan_root = Path(sys.argv[2]) if len(sys.argv) > 2 else repo
     out_path = repo / ".scar" / "findings-llm-scan.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    c_files = sorted(repo.rglob("*.c"))
+    c_files = sorted(scan_root.rglob("*.c"))
     print(f"[llm-scan] {len(c_files)} C file(s) to scan", flush=True)
 
     findings = []

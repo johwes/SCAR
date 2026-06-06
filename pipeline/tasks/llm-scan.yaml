@@ -4,10 +4,14 @@ metadata:
   name: scar-llm-scan
 spec:
   description: >
-    LLM vulnerability scan (nano-analyzer Stage 2). Scans all C files in the
-    workspace for zero-day bugs the static analyzer cannot model — string
-    function overflows, type confusion, logic errors, protocol bugs.
-    Writes .scar/llm-findings.json for consumption by the repair-loop task.
+    LLM vulnerability scan (nano-analyzer Stage 2). Scans C files in the
+    source directory for zero-day bugs the static analyzer cannot model —
+    string function overflows, type confusion, logic errors, protocol bugs.
+    Writes .scar/findings-llm-scan.json for consumption by the repair-loop task.
+  params:
+    - name: source-dir
+      description: Path within the workspace containing C source files
+      default: "."
   workspaces:
     - name: source
       description: Shared workspace containing the cloned C repository
@@ -33,4 +37,6 @@ spec:
       script: |
         #!/bin/bash
         set -euo pipefail
-        python3 -u -m scar.scan_cmd $(workspaces.source.path)
+        WS=$(workspaces.source.path)
+        SRC="$WS/$(params.source-dir)"
+        python3 -u -m scar.scan_cmd "$WS" "$SRC"

@@ -67,6 +67,9 @@ spec:
       workspaces:
         - name: source
           workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
 
     - name: repair-loop
       taskRef:
