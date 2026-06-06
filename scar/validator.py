@@ -53,13 +53,18 @@ def _check_compilation(patch: str, source_path: Path, repo_root: Path | None = N
 
     flags = _compile_flags(source_path, repo_root)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        out = Path(tmpdir) / source_path.name
-        out.write_text(patched, encoding="utf-8")
-        cmd = ["clang", "-c", "-x", "c", "-O0", "-Wall"] + flags + ["-o", "/dev/null", str(out)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    # Write the patched file as a sibling of the original so that relative
+    # include paths (-I. / -I../include / #include "local.h") resolve correctly.
+    patched_sibling = source_path.with_name(f".scar_tmp_{source_path.name}")
+    try:
+        patched_sibling.write_text(patched, encoding="utf-8")
+        cmd = ["clang", "-c", "-x", "c", "-O0", "-Wall"] + flags + ["-o", "/dev/null", str(patched_sibling)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=source_path.parent)
         if proc.returncode != 0:
             return ValidationResult(False, "compile", proc.stderr[:500])
+    finally:
+        if patched_sibling.exists():
+            patched_sibling.unlink()
 
     return ValidationResult(True, "ok", "Compiled successfully")
 
@@ -79,7 +84,7 @@ def _compile_flags(source_path: Path, repo_root: Path | None) -> list[str]:
                         i = 0
                         while i < len(parts):
                             p = parts[i]
-                            if p in ("-I", "-D", "-isystem", "-iquote"):
+                            if p in ("-I", "-D", "-isystem", "-iquote") and (i + 1) < len(parts):
                                 flags += [p, parts[i + 1]]
                                 i += 2
                             elif p.startswith(("-I", "-D", "-isystem", "-iquote", "-std=")):

@@ -24,7 +24,15 @@ def main() -> None:
     ikos_findings = bridge.parse()
     print(f"[scar] {len(ikos_findings)} finding(s) from IKOS", flush=True)
 
-    ikos_locations = {(f.file_path, f.line) for f in ikos_findings}
+    # Build a per-file line index for ±3-line sliding-window deduplication.
+    # LLMs and static analyzers often flag the same bug at slightly different
+    # line numbers (e.g. the memcpy sink vs. the tainted assignment above it).
+    ikos_map: dict[str, list[int]] = {}
+    for f in ikos_findings:
+        ikos_map.setdefault(f.file_path, []).append(f.line)
+
+    def _near_ikos(file_path: str, line: int, radius: int = 3) -> bool:
+        return any(abs(line - l) <= radius for l in ikos_map.get(file_path, []))
 
     # ── LLM scan findings (written by parallel scar-llm-scan task) ──────────
     llm_findings_path = Path(args.repo) / ".scar" / "llm-findings.json"
@@ -32,9 +40,8 @@ def main() -> None:
     if llm_findings_path.exists():
         raw = json.loads(llm_findings_path.read_text())
         for item in raw:
-            loc = (item["file_path"], item["line"])
-            if loc in ikos_locations:
-                continue  # IKOS already covers this location
+            if _near_ikos(item["file_path"], item["line"]):
+                continue  # IKOS already covers this location (within ±3 lines)
             llm_findings.append(Finding(
                 rule_id=item["rule_id"],
                 severity=item["severity"],
@@ -55,7 +62,7 @@ def main() -> None:
 
     for finding in all_findings:
         source = finding.file_path
-        origin = "ikos" if (source, finding.line) in ikos_locations else "llm"
+        origin = "ikos" if finding in ikos_findings else "llm"
         print(f"\n[scar] ── {finding.rule_id} @ {source}:{finding.line} [{origin}] ──", flush=True)
         print(f"  {finding.message}", flush=True)
 
