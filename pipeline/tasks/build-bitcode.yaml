@@ -37,6 +37,24 @@ spec:
           if [ -f "$CCDB" ]; then
             echo "compile_commands.json generated from bear+make ($(wc -l < "$CCDB") lines)"
           fi
+        elif [ -f "$SRC/build.sh" ]; then
+          echo "Detected OSS-Fuzz build.sh — capturing compile commands via bear"
+          # Set the standard OSS-Fuzz environment so build.sh runs correctly.
+          # Disable sanitizers/fuzzing instrumentation; we want plain clang output.
+          export SRC="$SRC"
+          export WORK="$WS/.scar/oss-work"
+          export OUT="$WS/.scar/oss-out"
+          export CC=clang
+          export CXX=clang++
+          export CFLAGS="-O0 -g"
+          export CXXFLAGS="-O0 -g"
+          export LIB_FUZZING_ENGINE="-lFuzzer"
+          export SANITIZER=none
+          mkdir -p "$WORK" "$OUT"
+          cd "$SRC" && bear --output "$CCDB" -- bash build.sh 2>&1 | tail -5 || true
+          if [ -f "$CCDB" ]; then
+            echo "compile_commands.json generated from OSS-Fuzz build.sh ($(wc -l < "$CCDB") lines)"
+          fi
         else
           echo "No build system detected — validator will use -I parent fallback"
         fi

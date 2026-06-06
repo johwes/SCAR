@@ -1,7 +1,7 @@
 """Entry point for the scar-llm-scan Tekton task.
 
 Scans all C files in a repo directory using the LLM vulnerability scanner
-(nano-analyzer Stage 2) and writes results to .scar/llm-findings.json.
+(nano-analyzer Stage 2) and writes results to .scar/findings-llm-scan.json.
 """
 
 import json
@@ -17,7 +17,7 @@ def main() -> None:
         sys.exit(1)
 
     repo = Path(sys.argv[1])
-    out_path = repo / ".scar" / "llm-findings.json"
+    out_path = repo / ".scar" / "findings-llm-scan.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     c_files = sorted(repo.rglob("*.c"))

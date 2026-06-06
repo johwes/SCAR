@@ -34,25 +34,37 @@ def main() -> None:
     def _near_ikos(file_path: str, line: int, radius: int = 3) -> bool:
         return any(abs(line - l) <= radius for l in ikos_map.get(file_path, []))
 
-    # ── LLM scan findings (written by parallel scar-llm-scan task) ──────────
-    llm_findings_path = Path(args.repo) / ".scar" / "llm-findings.json"
-    llm_findings: list[Finding] = []
-    if llm_findings_path.exists():
-        raw = json.loads(llm_findings_path.read_text())
-        for item in raw:
-            if _near_ikos(item["file_path"], item["line"]):
-                continue  # IKOS already covers this location (within ±3 lines)
-            llm_findings.append(Finding(
-                rule_id=item["rule_id"],
-                severity=item["severity"],
-                file_path=item["file_path"],
-                line=item["line"],
-                column=item.get("column", 0),
-                message=item["message"],
-            ))
-        print(f"[scar] {len(llm_findings)} additional finding(s) from LLM scan", flush=True)
-    else:
-        print(f"[scar] no LLM scan results found (llm-findings.json missing)", flush=True)
+    # ── Auxiliary findings (any task writing .scar/findings-<name>.json) ────
+    # Convention: any analyzer Tekton task drops a findings-<name>.json file
+    # in .scar/ using the schema {rule_id, severity, file_path, line, message}.
+    # The repair loop discovers and deduplicates all of them automatically —
+    # no changes needed here when a new tool is added to the pipeline.
+    aux_findings: list[Finding] = []
+    scar_dir = Path(args.repo) / ".scar"
+    for findings_file in sorted(scar_dir.glob("findings-*.json")):
+        try:
+            raw = json.loads(findings_file.read_text())
+            before = len(aux_findings)
+            for item in raw:
+                if _near_ikos(item["file_path"], item["line"]):
+                    continue  # IKOS already covers this location (within ±3 lines)
+                aux_findings.append(Finding(
+                    rule_id=item["rule_id"],
+                    severity=item["severity"],
+                    file_path=item["file_path"],
+                    line=item["line"],
+                    column=item.get("column", 0),
+                    message=item["message"],
+                ))
+            added = len(aux_findings) - before
+            print(f"[scar] {added} finding(s) from {findings_file.name}", flush=True)
+        except Exception as exc:
+            print(f"[scar] warning: could not load {findings_file.name}: {exc}", flush=True)
+
+    if not list(scar_dir.glob("findings-*.json")):
+        print(f"[scar] no auxiliary findings files found in .scar/", flush=True)
+
+    llm_findings = aux_findings
 
     all_findings = ikos_findings + llm_findings
     print(f"[scar] {len(all_findings)} total finding(s) to process", flush=True)
