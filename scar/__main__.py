@@ -27,12 +27,17 @@ def main() -> None:
     # Build a per-file line index for ±3-line sliding-window deduplication.
     # LLMs and static analyzers often flag the same bug at slightly different
     # line numbers (e.g. the memcpy sink vs. the tainted assignment above it).
+    # Normalise all IKOS paths to resolved absolute form so that comparisons
+    # against LLM-scan paths (which may use rglob-absolute or SARIF-relative
+    # roots) never silently miss due to path string mismatches.
     ikos_map: dict[str, list[int]] = {}
     for f in ikos_findings:
-        ikos_map.setdefault(f.file_path, []).append(f.line)
+        norm = str(Path(f.file_path).resolve())
+        ikos_map.setdefault(norm, []).append(f.line)
 
     def _near_ikos(file_path: str, line: int, radius: int = 3) -> bool:
-        return any(abs(line - l) <= radius for l in ikos_map.get(file_path, []))
+        norm = str(Path(file_path).resolve())
+        return any(abs(line - l) <= radius for l in ikos_map.get(norm, []))
 
     # ── Auxiliary findings (any task writing .scar/findings-<name>.json) ────
     # Convention: any analyzer Tekton task drops a findings-<name>.json file

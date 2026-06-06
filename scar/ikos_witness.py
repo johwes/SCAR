@@ -73,11 +73,25 @@ def _find_file_id(con: sqlite3.Connection, tables: set, file_path: str) -> int |
             continue
         basename = Path(file_path).name
         rows = con.execute(
-            f"SELECT id FROM {table} WHERE path = ? OR path LIKE ?",
+            f"SELECT id, path FROM {table} WHERE path = ? OR path LIKE ?",
             (file_path, f"%/{basename}"),
         ).fetchall()
-        if rows:
+        if not rows:
+            continue
+        if len(rows) == 1:
             return rows[0][0]
+        # Multiple files share the same basename — pick the entry whose path
+        # shares the longest common suffix with the target (most specific match).
+        target_parts = Path(file_path).parts
+        best_id, best_score = rows[0][0], -1
+        for row_id, db_path in rows:
+            score = sum(
+                1 for a, b in zip(reversed(target_parts), reversed(Path(db_path).parts))
+                if a == b
+            )
+            if score > best_score:
+                best_score, best_id = score, row_id
+        return best_id
     return None
 
 
