@@ -17,18 +17,19 @@ spec:
       script: |
         #!/bin/bash
         set -euo pipefail
-        SRC=$(workspaces.source.path)/$(params.source-dir)
-        OUT=$(workspaces.source.path)/.scar/bitcode
-        CCDB=$(workspaces.source.path)/.scar/compile_commands.json
+        WS=$(workspaces.source.path)
+        SRC="$WS/$(params.source-dir)"
+        BCDIR="$WS/.scar/bitcode"
+        CCDB="$WS/.scar/compile_commands.json"
 
-        mkdir -p "$OUT"
+        mkdir -p "$BCDIR"
 
         # Generate compile_commands.json so the validator can use exact per-file flags.
         if [ -f "$SRC/CMakeLists.txt" ]; then
           echo "Detected CMakeLists.txt — extracting compile commands via cmake"
-          cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B "$OUT/cmake-build" "$SRC" 2>&1 | tail -3 || true
-          if [ -f "$OUT/cmake-build/compile_commands.json" ]; then
-            cp "$OUT/cmake-build/compile_commands.json" "$CCDB"
+          cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B "$BCDIR/cmake-build" "$SRC" 2>&1 | tail -3 || true
+          if [ -f "$BCDIR/cmake-build/compile_commands.json" ]; then
+            cp "$BCDIR/cmake-build/compile_commands.json" "$CCDB"
             echo "compile_commands.json generated from CMake ($(wc -l < "$CCDB") lines)"
           fi
         elif [ -f "$SRC/Makefile" ]; then
@@ -41,6 +42,7 @@ spec:
           echo "Detected OSS-Fuzz build.sh — capturing compile commands via bear"
           # Set the standard OSS-Fuzz environment so build.sh runs correctly.
           # Disable sanitizers/fuzzing instrumentation; we want plain clang output.
+          # Use OUT/WORK/SRC as OSS-Fuzz expects; BCDIR is kept separate for bitcode.
           export SRC="$SRC"
           export WORK="$WS/.scar/oss-work"
           export OUT="$WS/.scar/oss-out"
@@ -61,7 +63,7 @@ spec:
 
         find "$SRC" -name "*.c" | while read -r f; do
           rel="${f#$SRC/}"
-          bc="$OUT/${rel%.c}.bc"
+          bc="$BCDIR/${rel%.c}.bc"
           mkdir -p "$(dirname "$bc")"
           clang -c -emit-llvm -g -O0 \
             -Xclang -disable-O0-optnone \

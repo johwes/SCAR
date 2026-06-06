@@ -51,7 +51,7 @@ def _check_compilation(patch: str, source_path: Path, repo_root: Path | None = N
     if patched is None:
         return ValidationResult(False, "patch_apply", "Unified diff failed to apply cleanly")
 
-    flags = _compile_flags(source_path, repo_root)
+    flags, build_cwd = _compile_flags_and_cwd(source_path, repo_root)
 
     # Write the patched file as a sibling of the original so that relative
     # include paths (-I. / -I../include / #include "local.h") resolve correctly.
@@ -59,7 +59,10 @@ def _check_compilation(patch: str, source_path: Path, repo_root: Path | None = N
     try:
         patched_sibling.write_text(patched, encoding="utf-8")
         cmd = ["clang", "-c", "-x", "c", "-O0", "-Wall"] + flags + ["-o", "/dev/null", str(patched_sibling)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=source_path.parent)
+        # Run from the directory recorded in compile_commands.json so that
+        # relative -I paths (e.g. -I../include) resolve against the original
+        # build root, not the source file's parent directory.
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=build_cwd)
         if proc.returncode != 0:
             return ValidationResult(False, "compile", proc.stderr[:500])
     finally:
@@ -69,8 +72,14 @@ def _check_compilation(patch: str, source_path: Path, repo_root: Path | None = N
     return ValidationResult(True, "ok", "Compiled successfully")
 
 
-def _compile_flags(source_path: Path, repo_root: Path | None) -> list[str]:
-    """Return compiler flags for source_path, sourced from compile_commands.json when available."""
+def _compile_flags_and_cwd(source_path: Path, repo_root: Path | None) -> tuple[list[str], Path]:
+    """Return (compiler_flags, working_directory) for source_path.
+
+    Flags and cwd are sourced from the matching compile_commands.json entry
+    when available. The directory field is the build root against which all
+    relative -I paths in the command were originally evaluated.
+    """
+    fallback_cwd = source_path.parent
     if repo_root:
         ccdb_path = repo_root / ".scar" / "compile_commands.json"
         if ccdb_path.exists():
@@ -79,6 +88,7 @@ def _compile_flags(source_path: Path, repo_root: Path | None) -> list[str]:
                 resolved = source_path.resolve()
                 for entry in entries:
                     if Path(entry["file"]).resolve() == resolved:
+                        build_cwd = Path(entry.get("directory", fallback_cwd))
                         parts = shlex.split(entry.get("command", ""))
                         flags: list[str] = []
                         i = 0
@@ -92,10 +102,10 @@ def _compile_flags(source_path: Path, repo_root: Path | None) -> list[str]:
                                 i += 1
                             else:
                                 i += 1
-                        return flags
+                        return flags, build_cwd
             except Exception:
                 pass
-    return [f"-I{source_path.parent}"]
+    return [f"-I{fallback_cwd}"], fallback_cwd
 
 
 def _apply_patch(source: str, patch: str, filename: str) -> str | None:
