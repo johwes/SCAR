@@ -15,50 +15,54 @@ spec:
         set -euo pipefail
         WS=$(workspaces.source.path)
         BCDIR="$WS/.scar/bitcode"
-        SARIF_DIR="$WS/.scar/sarif"
+        OUT_DIR="$WS/.scar"
+        SARIF_DIR="$OUT_DIR/sarif"
         mkdir -p "$SARIF_DIR"
 
-        find "$BCDIR" -name "*.bc" | while read -r bc; do
-          name="$(basename "${bc%.bc}")"
+        # Collect library bitcode — exclude fuzzer harnesses which have no
+        # regular exported API and cause IKOS to abort on missing entry points.
+        mapfile -t bc_files < <(find "$BCDIR" -name "*.bc" | sort | grep -iv "fuzz")
 
-          # Skip fuzzer harness — it has no main() and no regular API entry points.
-          if echo "$name" | grep -qi "fuzz"; then
-            echo "skip (fuzzer harness): $bc"
-            continue
-          fi
+        if [ ${#bc_files[@]} -eq 0 ]; then
+          echo "No bitcode files to analyze"
+          exit 0
+        fi
 
-          db="$WS/.scar/${name}.db"
-          sarif="$SARIF_DIR/${name}.sarif"
+        echo "Bitcode modules to link:"
+        printf '  %s\n' "${bc_files[@]}"
 
-          echo "analyzing: $bc"
+        # Link individual translation units into one whole-program module so
+        # IKOS can perform true interprocedural abstract interpretation across
+        # module boundaries (e.g. trace a buffer from parse.c into session.c).
+        echo "Linking into whole_program.bc..."
+        llvm-link "${bc_files[@]}" -o "$OUT_DIR/whole_program.bc"
 
-          # Derive entry points by disassembling the bitcode to LLVM IR and
-          # extracting non-internal function definitions. llvm-dis is used
-          # because llvm-nm does not reliably read LLVM bitcode in all
-          # container environments.
-          entry_pts=$(llvm-dis -o - "$bc" 2>/dev/null \
-            | grep '^define ' \
-            | grep -v 'internal\|private\|@llvm\.' \
-            | sed -E 's/.*@([a-zA-Z_][a-zA-Z0-9_]*)\(.*/\1/' \
-            | paste -sd, - || true)
-          if [ -z "$entry_pts" ]; then
-            entry_pts="main"
-          fi
-          echo "  entry points: $entry_pts"
+        # Derive entry points by disassembling the unified bitcode to LLVM IR.
+        # llvm-dis-14 is used by versioned path; the Dockerfile now also
+        # registers a plain llvm-dis alias for future image builds.
+        entry_pts=$(llvm-dis-14 -o - "$OUT_DIR/whole_program.bc" 2>/dev/null \
+          | grep '^define ' \
+          | grep -v 'internal\|private\|@llvm\.' \
+          | sed -E 's/.*@([a-zA-Z_][a-zA-Z0-9_]*)\(.*/\1/' \
+          | paste -sd, - || true)
+        if [ -z "$entry_pts" ]; then
+          entry_pts="main"
+        fi
+        echo "Entry points: $entry_pts"
 
-          ikos \
-            --entry-points="$entry_pts" \
-            --analyses=boa,dbz,nullity,uva,sio,dfa \
-            --output-db="$db" \
-            "$bc" || true
+        ikos \
+          --entry-points="$entry_pts" \
+          --analyses=boa,dbz,nullity,uva,sio,dfa \
+          --output-db="$OUT_DIR/whole_program.db" \
+          "$OUT_DIR/whole_program.bc" || true
 
-          if [ -f "$db" ]; then
-            ikos-report --format=sarif "$db" > "$sarif" || true
-            echo "  -> $sarif"
-          else
-            echo "  WARNING: ikos did not produce a db for $bc — skipping report"
-          fi
-        done
+        if [ -f "$OUT_DIR/whole_program.db" ]; then
+          ikos-report --format=sarif "$OUT_DIR/whole_program.db" \
+            > "$SARIF_DIR/whole_program.sarif" || true
+          echo "-> $SARIF_DIR/whole_program.sarif"
+        else
+          echo "WARNING: ikos did not produce a db"
+        fi
 
     - name: merge-sarif
       image: quay.io/jwesterl/scar-ikos:latest

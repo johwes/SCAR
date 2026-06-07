@@ -80,7 +80,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && chmod +x /usr/local/bin/yq \
  && rm -rf /var/lib/apt/lists/* \
  && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 14 \
- && update-alternatives --install /usr/bin/llvm-link llvm-link /usr/bin/llvm-link-14 14
+ && update-alternatives --install /usr/bin/llvm-link llvm-link /usr/bin/llvm-link-14 14 \
+ && update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-14 14 \
+ && update-alternatives --install /usr/bin/llvm-dis llvm-dis /usr/bin/llvm-dis-14 14
 
 COPY --from=builder /opt/ikos /opt/ikos
 
