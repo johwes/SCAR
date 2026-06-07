@@ -87,7 +87,8 @@ def _compile_flags_and_cwd(source_path: Path, repo_root: Path | None) -> tuple[l
                 entries = json.loads(ccdb_path.read_text())
                 resolved = source_path.resolve()
                 for entry in entries:
-                    if Path(entry["file"]).resolve() == resolved:
+                    if entry.get("file") and entry.get("directory") and \
+                            (Path(entry["directory"]) / entry["file"]).resolve() == resolved:
                         build_cwd = Path(entry.get("directory", fallback_cwd))
                         parts = shlex.split(entry.get("command", ""))
                         flags: list[str] = []
