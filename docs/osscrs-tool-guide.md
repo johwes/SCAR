@@ -76,6 +76,12 @@ array. Each entry needs these fields:
 | `line` | yes | 1-based line number |
 | `description` | no | Human-readable message passed to the LLM as context |
 
+> **Tip:** If your tool scans a file and finds nothing, skip the `libCRS.submit()` call
+> entirely. Submitting an empty `{"vulnerabilities": []}` payload writes a redundant
+> `findings-osscrs-*.json` file to `.scar/`. The repair loop handles it safely, but
+> suppressing empty submissions keeps the workspace clean and avoids unnecessary noise
+> in large pipeline runs.
+
 > **Note on file paths:** Your tool runs against a sandbox copy of the source at
 > `$SANDBOX_SRC`. Use the sandbox path in `file` — the bridge automatically remaps
 > it back to the real PVC path before writing the findings file.
@@ -235,7 +241,7 @@ tkn pipeline start scar \
 ```
 [libCRS] register_submit_dir(bug-candidate, /tmp/my-scanner-abc123)
 [libCRS] intercepted bug-candidate from /tmp/my-scanner-abc123/finding-input-12.json
-[libCRS] 1 finding(s) normalized → /workspace/source/.scar/findings-osscrs-1234567890.json
+[libCRS] 1 finding(s) normalized → /workspace/source/.scar/findings-osscrs-1717743891000000000.json
 ```
 
 **repair-loop step:**
