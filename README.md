@@ -56,7 +56,12 @@ repair pipeline.
 
 cppcheck runs alongside IKOS as a supplementary pass (output stored as `.scar/cppcheck.xml`).
 
-IKOS also writes `output.db` — a SQLite database containing the abstract interval
+Before running IKOS, all library translation units are merged with `llvm-link` into
+a single `whole_program.bc`. This gives IKOS full interprocedural visibility — it can
+trace a buffer filled in `parse.c` through a call into `session.c` — rather than
+stopping at module boundaries.
+
+IKOS writes `whole_program.db` — a SQLite database containing the abstract interval
 state at each flagged statement. SCAR reads this via `ikos_witness.py` and injects
 the counterexample trace (checker, status, call context) into the context generation
 prompt, giving the LLM proven execution data rather than requiring it to re-derive

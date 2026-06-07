@@ -107,9 +107,11 @@ def main() -> None:
         print(f"  {finding.message}", flush=True)
 
         print(f"  [1/3] Generating security briefing...", flush=True)
-        # Locate the IKOS witness db for this file (named after the .c basename)
+        # Prefer whole_program.db (whole-program link); fall back to per-file db.
+        scar_dir = Path(args.repo) / ".scar"
+        whole_db = scar_dir / "whole_program.db"
         stem = Path(source).stem
-        witness_db = Path(args.repo) / ".scar" / f"{stem}.db"
+        witness_db = whole_db if whole_db.exists() else scar_dir / f"{stem}.db"
         briefing = context_gen.generate(
             source, args.repo,
             witness_db=witness_db if witness_db.exists() else None,
