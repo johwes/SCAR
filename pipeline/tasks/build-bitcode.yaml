@@ -79,14 +79,22 @@ spec:
         if Path(ccdb_path).exists():
             print("Emitting bitcode using compile_commands.json flags", flush=True)
             entries  = json.load(open(ccdb_path))
-            ccdb_map = {str(Path(e["file"]).resolve()): e for e in entries if e.get("file")}
+
+            # Per the LLVM compilation database spec, "file" may be relative to
+            # "directory". Always join and resolve together so that relative keys
+            # like "../../src/input.c" produce the correct absolute path for lookup.
+            ccdb_map = {}
+            for e in entries:
+                if e.get("file") and e.get("directory"):
+                    abs_file = str((Path(e["directory"]) / e["file"]).resolve())
+                    ccdb_map[abs_file] = e
 
             for f in sorted(src_path.rglob("*.c")):
                 rel = f.relative_to(src_path)
                 bc  = Path(bcdir) / rel.parent / (rel.stem + ".bc")
                 bc.parent.mkdir(parents=True, exist_ok=True)
 
-                entry = ccdb_map.get(str(f))
+                entry = ccdb_map.get(str(f.resolve()))
                 flags, build_cwd = [], str(f.parent)
                 if entry:
                     parts = shlex.split(entry.get("command", ""))
