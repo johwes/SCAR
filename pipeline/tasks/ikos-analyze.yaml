@@ -32,10 +32,15 @@ spec:
 
           echo "analyzing: $bc"
 
-          # Derive entry points from the bitcode's exported text symbols.
-          # --format=posix gives: name type value [size] — $1=name, $2=type.
-          entry_pts=$(llvm-nm --defined-only --extern-only --format=posix "$bc" 2>/dev/null \
-            | awk '$2 == "T" { print $1 }' | paste -sd, - || true)
+          # Derive entry points by disassembling the bitcode to LLVM IR and
+          # extracting non-internal function definitions. llvm-dis is used
+          # because llvm-nm does not reliably read LLVM bitcode in all
+          # container environments.
+          entry_pts=$(llvm-dis -o - "$bc" 2>/dev/null \
+            | grep '^define ' \
+            | grep -v 'internal\|private\|@llvm\.' \
+            | sed -E 's/.*@([a-zA-Z_][a-zA-Z0-9_]*)\(.*/\1/' \
+            | paste -sd, - || true)
           if [ -z "$entry_pts" ]; then
             entry_pts="main"
           fi
