@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .sarif_bridge import IkosSarifBridge, Finding
-from . import context_gen, patch_gen, triage, validator
+from . import context_gen, patch_gen, triage, validator, llm
 
 # Optional OSS-CRS integration — libCRS is injected via PYTHONPATH when SCAR
 # runs inside an OSS-CRS environment or via SCAR's own Tekton pipeline (where
@@ -152,6 +152,16 @@ def main() -> None:
 
     Path(args.output).write_text(json.dumps(accepted, indent=2))
     print(f"\n[scar] {len(accepted)} patch(es) accepted → {args.output}", flush=True)
+
+    usage = llm.get_usage()
+    if usage["total_tokens"]:
+        print(
+            f"[scar] tokens: {usage['prompt_tokens']:,} prompt + "
+            f"{usage['completion_tokens']:,} completion = "
+            f"{usage['total_tokens']:,} total",
+            flush=True,
+        )
+
     sys.exit(0 if accepted else 1)
 
 
