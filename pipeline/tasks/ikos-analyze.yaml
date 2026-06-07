@@ -29,7 +29,7 @@ spec:
           # Full executables expose 'main'; library objects expose their API.
           # Using llvm-nm avoids hard-coding function names per project.
           entry_pts=$(llvm-nm --defined-only --extern-only "$bc" 2>/dev/null \
-            | awk '$2 == "T" { print $3 }' | paste -sd, -)
+            | awk '$2 == "T" { print $3 }' | paste -sd, - || true)
           if [ -z "$entry_pts" ]; then
             entry_pts="main"
           fi
