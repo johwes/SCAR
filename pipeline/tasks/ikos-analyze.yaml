@@ -24,8 +24,19 @@ spec:
           sarif="$SARIF_DIR/${name}.sarif"
 
           echo "analyzing: $bc"
+
+          # Derive entry points from the bitcode's exported text symbols.
+          # Full executables expose 'main'; library objects expose their API.
+          # Using llvm-nm avoids hard-coding function names per project.
+          entry_pts=$(llvm-nm --defined-only --extern-only "$bc" 2>/dev/null \
+            | awk '$2 == "T" { print $3 }' | paste -sd, -)
+          if [ -z "$entry_pts" ]; then
+            entry_pts="main"
+          fi
+          echo "  entry points: $entry_pts"
+
           ikos \
-            --entry-points=main \
+            --entry-points="$entry_pts" \
             --analyses=boa,dbz,nullity,uva,sio,dfa \
             --output-db="$db" \
             "$bc" || true
