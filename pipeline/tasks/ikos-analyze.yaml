@@ -40,11 +40,20 @@ spec:
         # Derive entry points by disassembling the unified bitcode to LLVM IR.
         # llvm-dis-14 is used by versioned path; the Dockerfile now also
         # registers a plain llvm-dis alias for future image builds.
-        entry_pts=$(llvm-dis-14 -o - "$OUT_DIR/whole_program.bc" 2>/dev/null \
+        raw_symbols=$(llvm-dis-14 -o - "$OUT_DIR/whole_program.bc" 2>/dev/null \
           | grep '^define ' \
           | grep -v 'internal\|private\|@llvm\.' \
-          | sed -E 's/.*@([a-zA-Z_][a-zA-Z0-9_]*)\(.*/\1/' \
-          | paste -sd, - || true)
+          | sed -E 's/.*@([a-zA-Z_][a-zA-Z0-9_]*)\(.*/\1/' || true)
+
+        # If main is present, use it exclusively: this avoids ARG_MAX overflow on
+        # large targets (Nginx exports thousands of symbols) and eliminates the
+        # over-approximation noise that comes from analysing library functions as
+        # independent entry points rather than tracing through from main.
+        if echo "$raw_symbols" | grep -q "^main$"; then
+          entry_pts="main"
+        else
+          entry_pts=$(echo "$raw_symbols" | paste -sd, - || true)
+        fi
         if [ -z "$entry_pts" ]; then
           entry_pts="main"
         fi

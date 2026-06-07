@@ -107,10 +107,6 @@ spec:
                 bc.parent.mkdir(parents=True, exist_ok=True)
 
                 entry = ccdb_map.get(str(f.resolve()))
-                if entry is None:
-                    print(f"skip: {f} (not in compile_commands.json)", flush=True)
-                    continue
-
                 flags, build_cwd = [], str(f.parent)
                 if entry:
                     # LLVM spec allows either "command" (string) or "arguments" (list).
@@ -129,6 +125,16 @@ spec:
                         else:
                             i += 1
                     build_cwd = entry.get("directory", build_cwd)
+                else:
+                    # File not in CCDB (e.g. main.c excluded by OSS-Fuzz build.sh).
+                    # Fall back to local include heuristic rather than skipping — clang
+                    # will emit bitcode if headers resolve; otherwise the error path below
+                    # prints a skip message and continues.
+                    flags = [f"-I{f.parent}"]
+                    for inc_name in ("include", "inc"):
+                        inc_dir = src_path / inc_name
+                        if inc_dir.is_dir():
+                            flags.append(f"-I{inc_dir}")
 
                 cmd = ["clang", "-c", "-emit-llvm", "-g", "-O0", "-Xclang", "-disable-O0-optnone"] \
                       + flags + ["-o", str(bc), str(f)]
