@@ -32,10 +32,19 @@ def validate(patch: str, source_path: str | Path, repo_root: str | Path | None =
 
 
 def _check_safety_rules(patch: str) -> ValidationResult:
+    lines = patch.splitlines()
     added_lines = "\n".join(
-        line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")
+        line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")
     )
-    if _HEAP_ALLOC.search(added_lines):
+    removed_lines = "\n".join(
+        line[1:] for line in lines if line.startswith("-") and not line.startswith("---")
+    )
+    # Net-count check: a patch that preserves an existing malloc (removes it in
+    # one hunk, adds it back in the same hunk with a surrounding guard) is fine.
+    # Only reject if the patch increases the number of heap-allocation calls.
+    added_alloc = len(_HEAP_ALLOC.findall(added_lines))
+    removed_alloc = len(_HEAP_ALLOC.findall(removed_lines))
+    if added_alloc > removed_alloc:
         return ValidationResult(False, "safety", "Patch introduces dynamic heap allocation")
     if _BANNED_STR.search(added_lines):
         return ValidationResult(False, "safety", "Patch introduces MISRA-banned string function")

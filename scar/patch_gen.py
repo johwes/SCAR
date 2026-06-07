@@ -23,7 +23,9 @@ the vulnerability. Your patch must:
   same missing check). Fix ALL occurrences in a single multi-hunk patch — \
   leaving any identical instance unpatched makes the fix incomplete.
 - Fix only the reported vulnerability pattern — no unrelated refactoring
-- Never introduce malloc, free, realloc, calloc, or alloca
+- Never add new calls to malloc, free, realloc, calloc, or alloca that did \
+  not exist in the original code — preserving an existing allocation call \
+  while adding a bounds check around it is fine
 - Never use strcpy, strcat, sprintf, vsprintf, or gets
 - Preserve all existing function signatures and struct layouts
 - Use bounded alternatives: strncpy, snprintf, memcpy with explicit length checks
