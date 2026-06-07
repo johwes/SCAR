@@ -17,7 +17,9 @@ You are an expert C security engineer. You will be given:
 - The full source file content
 
 Produce a minimal unified diff (--- a/file / +++ b/file format) that fixes \
-the vulnerability. Your patch must:
+the vulnerability. Use only 1 line of context (not the default 3) in each \
+hunk — the smallest context window that unambiguously locates the change. \
+Your patch must:
 - Before writing the diff, scan the ENTIRE source file for every occurrence \
   of the same vulnerable pattern (e.g. the same unsafe function call or the \
   same missing check). Fix ALL occurrences in a single multi-hunk patch — \

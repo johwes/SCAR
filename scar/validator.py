@@ -146,7 +146,12 @@ def _apply_patch(source: str, patch: str, filename: str) -> str | None:
             patch_file.write_text(patch, encoding="utf-8")
 
             proc = subprocess.run(
-                ["patch", "--batch", "-s", "-o", str(out_file), str(src_file), str(patch_file)],
+                [
+                    "patch", "--batch", "-s",
+                    "--fuzz=3",      # tolerate up to 3 mismatched context lines
+                    "-l",            # ignore whitespace differences in context
+                    "-o", str(out_file), str(src_file), str(patch_file),
+                ],
                 capture_output=True, text=True, timeout=10,
             )
             if proc.returncode != 0:
