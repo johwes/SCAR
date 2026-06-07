@@ -34,6 +34,8 @@ spec:
             secretKeyRef:
               name: scar-llm-credentials
               key: model
+        - name: SCAR_WORKSPACE
+          value: $(workspaces.source.path)
       script: |
         #!/bin/bash
         set -euo pipefail

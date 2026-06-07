@@ -24,7 +24,22 @@ def _scar_dir() -> Path:
 
 
 def submit(data_type: str, file_path: str) -> None:
-    """Intercept a bug-candidate or pov submission and write findings-*.json."""
+    """Intercept a libCRS submission and route it based on data_type.
+
+    bug-candidate / pov:
+        Translate the OSS-CRS vulnerability payload to SCAR's findings schema
+        and drop it in .scar/ so the repair-loop picks it up automatically.
+
+    patch:
+        SCAR itself calls this after accepting a patch. In Tekton mode the
+        patch file is already on the shared PVC; we just log the call.
+        In a real OSS-CRS environment the framework replaces this shim and
+        handles the upload to the CRS ensemble.
+    """
+    if data_type == "patch":
+        print(f"[libCRS] patch submitted: {file_path}")
+        return
+
     if data_type not in ("bug-candidate", "pov"):
         print(f"[libCRS] ignoring non-vulnerability submission: {data_type}")
         return
@@ -64,7 +79,14 @@ def register_shared_dir(name: str, path: str) -> None:
 
 
 def register_fetch_dir(data_type: str, path: str) -> None:
-    """Stub — OSS-CRS agents call this to receive artifacts from the ensemble."""
+    """Register a directory to receive artifacts synced by the CRS ensemble.
+
+    In a real OSS-CRS environment the framework monitors this directory and
+    populates it with artifacts submitted by other tools. In Tekton/bridge
+    mode we just ensure the directory exists — parallel tasks already write
+    findings-*.json directly into .scar/, so SCAR finds them via its normal
+    glob without any additional sync step.
+    """
     print(f"[libCRS] register_fetch_dir({data_type}, {path})")
     Path(path).mkdir(parents=True, exist_ok=True)
 

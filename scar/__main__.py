@@ -8,6 +8,15 @@ from pathlib import Path
 from .sarif_bridge import IkosSarifBridge, Finding
 from . import context_gen, patch_gen, triage, validator
 
+# Optional OSS-CRS integration — libCRS is injected via PYTHONPATH when SCAR
+# runs inside an OSS-CRS environment or via SCAR's own Tekton pipeline (where
+# the libCRS_bridge shim intercepts the calls). Falls back gracefully when
+# neither is present (e.g. plain CLI usage on a dev machine).
+try:
+    import libCRS as _crs
+except ImportError:
+    _crs = None
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="scar", description="SCAR — Static C Analysis & Repair")
@@ -18,6 +27,20 @@ def main() -> None:
     parser.add_argument("--min-confidence", type=float, default=0.6)
     parser.add_argument("--output", default="scar-results.json")
     args = parser.parse_args()
+
+    # ── OSS-CRS registration ─────────────────────────────────────────────────
+    scar_dir = Path(args.repo) / ".scar"
+    scar_dir.mkdir(parents=True, exist_ok=True)
+    crs_patch_dir = scar_dir / "crs-patches"
+
+    if _crs is not None:
+        # Tell the CRS framework where SCAR will emit accepted patches.
+        _crs.register_submit_dir("patch", str(crs_patch_dir))
+        # Tell the CRS framework where to sync incoming bug-candidates from
+        # other ensemble tools. In a real CRS environment the framework syncs
+        # findings here; in Tekton mode the bridge is a no-op because parallel
+        # tasks already write findings-*.json directly into .scar/.
+        _crs.register_fetch_dir("bug-candidate", str(scar_dir))
 
     # ── IKOS findings ────────────────────────────────────────────────────────
     bridge = IkosSarifBridge(args.sarif, args.repo)
@@ -111,6 +134,17 @@ def main() -> None:
         if result.verdict == "VALID" and result.confidence >= args.min_confidence:
             accepted.append({"finding": finding.__dict__, "patch": patch, "triage": result.__dict__, "origin": origin})
             print(f"  [accept] {result.reason}", flush=True)
+
+            if _crs is not None:
+                # Write patch to a file and submit via libCRS so that in a real
+                # OSS-CRS environment the framework receives each accepted patch.
+                # In Tekton mode the bridge shim logs the call and the patch is
+                # already on the shared PVC via scar-results.json.
+                crs_patch_dir.mkdir(parents=True, exist_ok=True)
+                stem = Path(source).stem
+                patch_file = crs_patch_dir / f"patch-{stem}-{finding.line}.diff"
+                patch_file.write_text(patch)
+                _crs.submit("patch", str(patch_file))
         else:
             print(f"  [reject] {result.reason}", flush=True)
 
