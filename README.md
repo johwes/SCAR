@@ -8,8 +8,9 @@ Autonomous CVE scanning and patch generation for C codebases, orchestrated via O
 C source (x86)
   └─> build system detection → compile_commands.json  [Task: build-bitcode]
   └─> clang -emit-llvm → .bc                          [Task: build-bitcode]
-        ├─> IKOS → SARIF + output.db          [Task: ikos-analyze]  ─┐
-        └─> LLM vulnerability scan            [Task: llm-scan]      ─┤ (parallel)
+        ├─> IKOS → SARIF + output.db          [Task: ikos-analyze]   ─┐
+        ├─> LLM vulnerability scan            [Task: llm-scan]       ─┤ (parallel)
+        └─> OSS-CRS external tool            [Task: osscrs-scan]    ─┘
                                                                       ↓
               Stage 1: Context Gen + IKOS witness trace  ─┐  [Task: repair-loop]
               Stage 2: Patch Gen                          ─┤
@@ -17,9 +18,10 @@ C source (x86)
                     └─> accepted patches              [Task: submit-results]
 ```
 
-`ikos-analyze` and `llm-scan` run in parallel after bitcode compilation. The repair
-loop merges all finding sources, deduplicates with a ±3-line sliding window, and
-drives each finding through the three-stage LLM repair pipeline.
+`ikos-analyze`, `llm-scan`, and `osscrs-scan` run in parallel after bitcode
+compilation. The repair loop merges all finding sources, deduplicates with a
+±3-line sliding window, and drives each finding through the three-stage LLM
+repair pipeline.
 
 ## Components
 
@@ -35,8 +37,9 @@ drives each finding through the three-stage LLM repair pipeline.
 | `scar/validator.py` | Enforces MISRA safety rules and verifies compilation via `compile_commands.json` |
 | `scar/grep_tool.py` | Agentic grep — lets the LLM resolve `#define` constants across the repo |
 | `scar/llm.py` | OpenAI-compatible client (LiteLLM, OpenAI, OpenRouter, vLLM) |
+| `scar/libCRS_bridge/libCRS.py` | OSS-CRS libCRS shim — intercepts submissions and normalises to SCAR findings schema |
 
-## Two scanning approaches
+## Three scanning approaches
 
 ### IKOS static analysis (sound)
 
@@ -62,22 +65,92 @@ the path from source alone.
 ### LLM vulnerability scan (broad)
 
 Inspired by [nano-analyzer](https://github.com/weareaisle/nano-analyzer), the LLM scan
-runs independently on every C file, hunting for bug classes IKOS cannot model: string
-function overflows, type confusion, logic errors, and protocol-level bugs. Findings are
-few-shot prompted, then deduplicated against IKOS results before entering the repair loop.
-Each accepted patch is tagged `[ikos]` or `[llm]` to indicate its origin.
+runs independently on every C file in `source-dir`, hunting for bug classes IKOS cannot
+model: string function overflows, type confusion, logic errors, and protocol-level bugs.
+Findings are few-shot prompted, then deduplicated against IKOS results before entering the
+repair loop. Each accepted patch is tagged `[ikos]` or `[llm]` to indicate its origin.
+
+### OSS-CRS external tool integration
+
+SCAR implements the [OSS-CRS](https://openssf.org/projects/open-source-crs/) libCRS API
+so it can run alongside — and consume findings from — any tool that participated in the
+[AIxCC](https://aicyberchallenge.com/) competition or the wider OSS-CRS ecosystem.
+
+#### SCAR as an OSS-CRS participant
+
+When SCAR's repair loop runs inside an OSS-CRS environment, it automatically:
+
+- Calls `libCRS.register_submit_dir("patch", ...)` at startup so the CRS ensemble
+  collects accepted patches.
+- Calls `libCRS.register_fetch_dir("bug-candidate", ...)` so it ingests findings from
+  other tools in the ensemble.
+- Calls `libCRS.submit("patch", <file>)` for every accepted patch.
+
+If libCRS is not on `PYTHONPATH` (standalone Tekton mode), SCAR falls back gracefully —
+no code changes needed.
+
+#### Running an external OSS-CRS tool (osscrs-scan task)
+
+The `osscrs-scan` task provides two integration patterns:
+
+**Pattern A — same container (tool bundled in scar-agent image)**
+
+Install the tool into the scar-agent image and point `tool-cmd` at it. Good for
+pure-Python tools with light dependencies.
+
+```dockerfile
+# containers/scar/Dockerfile.atlantis (copy of Dockerfile.osscrs-tool.example)
+FROM quay.io/jwesterl/scar-agent:latest
+RUN pip3 install --no-cache-dir atlantis-scanner==1.2.3
+```
+
+```bash
+tkn pipeline start scar \
+  --param tool-image=quay.io/jwesterl/scar-atlantis:latest \
+  --param tool-cmd="python3 -m atlantis_scan --target \$SANDBOX_SRC" \
+  ...
+```
+
+**Pattern B — external container (bridge injected at runtime)**
+
+Use the tool's own published image unchanged. The `inject-bridge` step copies the
+libCRS shim from the scar-agent image into the shared PVC; the tool's container then
+picks it up via `PYTHONPATH`. No modifications to the upstream image are needed.
+
+```bash
+tkn pipeline start scar \
+  --param tool-image=ghcr.io/team-atlantis/scanner:latest \
+  --param tool-cmd="/usr/local/bin/their-scanner --src \$SANDBOX_SRC" \
+  ...
+```
+
+In both patterns the bridge intercepts `libCRS.submit('bug-candidate', ...)` calls,
+normalises the payload to SCAR's findings schema, and writes
+`.scar/findings-osscrs-<ts>.json` — which the repair loop discovers automatically.
+
+The source is sandboxed to `/tmp/osscrs-sandbox` before the tool runs, so destructive
+verification steps cannot corrupt the shared PVC.
 
 ## Build system support
 
-`build-bitcode` automatically detects the project's build system and generates
-`compile_commands.json` so the validator uses exact per-file compiler flags:
+`build-bitcode` runs as two steps:
+
+1. **detect-build-system** (bash) — detects the project's build system and generates
+   `compile_commands.json` with exact per-file compiler flags.
+2. **emit-llvm** (Python) — reads `compile_commands.json` and emits one `.bc` bitcode
+   file per C source, passing the captured `-I`, `-D`, `-std=`, `-isystem`, and
+   `-iquote` flags to clang verbatim.
 
 | Detected file | Action |
 |---|---|
 | `CMakeLists.txt` | `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (no full build needed) |
 | `Makefile` | `bear -- make` intercepts compiler calls |
 | `build.sh` | OSS-Fuzz compatible — runs with `bear` and standard env vars (`$CC`, `$CFLAGS`, `$SRC`, `$WORK`, `$OUT`) |
-| none | Falls back to `-I <source_parent>` heuristic |
+| none | Falls back to standalone `clang -emit-llvm` per file |
+
+Per the [LLVM compilation database spec](https://clang.llvm.org/docs/JSONCompilationDatabase.html),
+the `file` field may be relative to the entry's `directory` field. SCAR always resolves
+both together before lookup, so projects with out-of-tree builds work correctly.
 
 This enables SCAR to scan any project in the [OSS-Fuzz](https://github.com/google/oss-fuzz)
 corpus (1,000+ open-source C projects) without per-project configuration.
@@ -115,9 +188,11 @@ needed when a new analyzer or fuzzer is added to the pipeline. To add a new tool
 
 ## Test corpus
 
+### johwes/scar-test-c
+
 [`johwes/scar-test-c`](https://github.com/johwes/scar-test-c) — two test targets:
 
-### Single-file (root of repo)
+**Single-file (root of repo)**
 
 Minimal C files, one vulnerability each, covering all active checkers:
 
@@ -131,7 +206,7 @@ Minimal C files, one vulnerability each, covering all active checkers:
 | `signedoverflow.c` | CWE-190 | `sio` | detected |
 | `doublefree.c` | CWE-415 | `dfa` | detected |
 
-### Multi-file (`multifile/`)
+**Multi-file (`multifile/`)**
 
 Three source files sharing a common header (`include/common.h`), built via an
 OSS-Fuzz `build.sh`. Tests the full build system detection and `compile_commands.json`
@@ -143,6 +218,28 @@ compilation.
 | `src/input.c` | CWE-121 (`strcpy`) | not detected | detected |
 | `src/process.c` | CWE-476 | `nullity` | detected |
 | `src/output.c` | CWE-369 | `dbz` | detected |
+
+### AIxCC challenge projects
+
+The [DARPA AI Cyber Challenge](https://aicyberchallenge.com/) (AIxCC) open-sourced its
+competition targets — real-world C codebases with synthetic CVEs injected. These make
+good end-to-end test targets for SCAR.
+
+| Project | Description |
+|---|---|
+| [`aixcc-public/challenge-004-nginx-cp`](https://github.com/aixcc-public/challenge-004-nginx-cp) | Nginx with synthetic vulnerability injections |
+| [`aixcc-public/challenge-001`](https://github.com/aixcc-public/challenge-001) | Linux kernel challenge project |
+
+```bash
+# Scan an AIxCC challenge project
+tkn pipeline start scar \
+  --param repo-url=https://github.com/aixcc-public/challenge-004-nginx-cp \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --showlog
+```
+
+AIxCC contestant tools (scanners that implement the libCRS API) can be plugged directly
+into the `osscrs-scan` task using Pattern A or Pattern B — see above.
 
 ## Configuration
 
@@ -168,9 +265,11 @@ oc apply -f pipeline/pipeline.yaml
 oc apply -f pipeline/pvc.yaml
 
 # Build and push container images
+# scar-ikos only needs a rebuild if the IKOS image itself changes
 podman build -t quay.io/jwesterl/scar-ikos:latest containers/ikos/
 podman push quay.io/jwesterl/scar-ikos:latest
 
+# scar-agent contains the Python repair loop and libCRS bridge
 podman build -t quay.io/jwesterl/scar-agent:latest containers/scar/
 podman push quay.io/jwesterl/scar-agent:latest
 
@@ -184,6 +283,14 @@ tkn pipeline start scar \
 tkn pipeline start scar \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --param source-dir=multifile \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --showlog
+
+# Run with an external OSS-CRS tool (Pattern B — unmodified upstream image)
+tkn pipeline start scar \
+  --param repo-url=https://github.com/johwes/scar-test-c \
+  --param tool-image=ghcr.io/example/osscrs-tool:latest \
+  --param tool-cmd="/usr/local/bin/scanner --src \$SANDBOX_SRC" \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 ```
@@ -211,7 +318,8 @@ pytest
 See [`IMPROVEMENTS.md`](IMPROVEMENTS.md) for a prioritised list of enhancements from
 low-hanging fruit (IKOS witness traces, macro expansion) through medium effort (caller
 context injection, RAG over accepted patches, parallel repair loop) to higher complexity
-(program slicing, cross-file data flow, reachability filtering).
+(program slicing, cross-file data flow, reachability filtering, ESBMC integration,
+fuzzer-driven triage, and ARM cross-compilation).
 
 ## Benchmarks
 
