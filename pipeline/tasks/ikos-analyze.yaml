@@ -41,8 +41,12 @@ spec:
             --output-db="$db" \
             "$bc" || true
 
-          ikos-report --format=sarif "$db" > "$sarif"
-          echo "  -> $sarif"
+          if [ -f "$db" ]; then
+            ikos-report --format=sarif "$db" > "$sarif" || true
+            echo "  -> $sarif"
+          else
+            echo "  WARNING: ikos did not produce a db for $bc — skipping report"
+          fi
         done
 
     - name: merge-sarif

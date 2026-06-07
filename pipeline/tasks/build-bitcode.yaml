@@ -107,6 +107,10 @@ spec:
                 bc.parent.mkdir(parents=True, exist_ok=True)
 
                 entry = ccdb_map.get(str(f.resolve()))
+                if entry is None:
+                    print(f"skip: {f} (not in compile_commands.json)", flush=True)
+                    continue
+
                 flags, build_cwd = [], str(f.parent)
                 if entry:
                     # LLVM spec allows either "command" (string) or "arguments" (list).
