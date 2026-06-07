@@ -4,33 +4,74 @@ metadata:
   name: scar-osscrs-scan
 spec:
   description: >
-    Run an OSS-CRS-compatible third-party scanner against the C source and
-    collect its findings via the libCRS bridge. The bridge intercepts
-    libCRS.submit() calls and writes .scar/findings-osscrs-<ts>.json, which
-    the repair-loop discovers automatically via the pluggable findings convention.
+    Run an OSS-CRS-compatible third-party scanner and collect its findings
+    via the libCRS bridge. Supports two integration patterns:
 
-    The source is sandboxed into /tmp/osscrs-sandbox before the tool runs so
-    that any destructive verification steps (patching, rebuilding) do not
-    corrupt the shared PVC workspace for parallel analyzers.
+    Pattern A — same container (tool-image = scar-agent):
+      Install the tool into the scar-agent image (pip install / COPY in
+      Dockerfile) and set tool-cmd to its entry point. Good for pure-Python
+      tools with light dependencies.
+
+    Pattern B — external container (tool-image = their image):
+      The bridge is copied from scar-agent into the shared PVC in the first
+      step, then PYTHONPATH is injected into the tool's container so
+      'import libCRS' resolves to the bridge without any changes to the
+      upstream image. Good for tools that ship their own heavy container.
+
+    In both patterns the bridge intercepts libCRS.submit('bug-candidate')
+    calls and writes .scar/findings-osscrs-<ts>.json, which the repair-loop
+    discovers automatically via the pluggable findings convention.
+
+    The source is sandboxed to /tmp/osscrs-sandbox before the tool runs to
+    prevent destructive verification steps from corrupting the shared PVC.
   params:
     - name: source-dir
       description: Path within the workspace containing C source files
       default: "."
+    - name: tool-image
+      description: >
+        Container image that runs the scanner.
+        Use quay.io/jwesterl/scar-agent:latest (Pattern A) when the tool is
+        installed into the scar-agent image.
+        Use the tool's own published image (Pattern B) when you want to run
+        an unmodified upstream container — the bridge is injected via
+        PYTHONPATH automatically.
+      default: "quay.io/jwesterl/scar-agent:latest"
     - name: tool-cmd
       description: >
-        Command to execute the OSS-CRS-compatible scanner.
-        The sandbox source root is available as $SANDBOX_SRC.
-        Example: "python3 /usr/local/bin/atlantis-scan --target $SANDBOX_SRC"
-      default: "echo 'No tool-cmd configured — skipping OSS-CRS scan'"
+        Shell command to execute the scanner. The sandbox source root is
+        available as $SANDBOX_SRC. Run 'echo' to skip (default).
+        Examples:
+          Pattern A: "python3 -m atlantis_scan --target $SANDBOX_SRC"
+          Pattern B: "/usr/local/bin/their-scanner --src $SANDBOX_SRC"
+      default: "echo '[osscrs-scan] No tool-cmd configured — skipping'"
   workspaces:
     - name: source
       description: Shared workspace containing the cloned C repository
   steps:
-    - name: run-scanner
+    - name: inject-bridge
       image: quay.io/jwesterl/scar-agent:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+
+        # Copy the libCRS bridge shim from the scar-agent image into the
+        # shared PVC so that the next step can put it on PYTHONPATH regardless
+        # of which container image it uses. This is the only cross-image
+        # coordination needed — no changes to the upstream tool image.
+        BRIDGE_DEST="$WS/.scar/libCRS_bridge"
+        mkdir -p "$BRIDGE_DEST"
+        cp -r /app/scar/libCRS_bridge/. "$BRIDGE_DEST/"
+        echo "[inject-bridge] bridge copied to $BRIDGE_DEST"
+
+    - name: run-scanner
+      image: $(params.tool-image)
       env:
         - name: SCAR_WORKSPACE
           value: $(workspaces.source.path)
+        - name: PYTHONPATH
+          value: $(workspaces.source.path)/.scar/libCRS_bridge
       script: |
         #!/bin/bash
         set -euo pipefail
@@ -45,7 +86,8 @@ spec:
 
         mkdir -p "$WS/.scar"
 
-        echo "[osscrs-scan] Running: $(params.tool-cmd)"
+        echo "[osscrs-scan] image:    $(params.tool-image)"
+        echo "[osscrs-scan] command:  $(params.tool-cmd)"
         eval "$(params.tool-cmd)" || true
 
-        echo "[osscrs-scan] Done"
+        echo "[osscrs-scan] done"

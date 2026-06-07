@@ -1,0 +1,35 @@
+# Example: Pattern A — extend scar-agent to include a specific OSS-CRS tool.
+#
+# Copy this file to containers/scar/Dockerfile.atlantis (or similar),
+# build it, and push it as a separate image tag. Then set tool-image in the
+# pipeline run to point to the new image.
+#
+# Usage:
+#   podman build -f containers/scar/Dockerfile.atlantis \
+#     -t quay.io/jwesterl/scar-atlantis:latest containers/scar/
+#   podman push quay.io/jwesterl/scar-atlantis:latest
+#
+#   tkn pipeline start scar \
+#     --param tool-image=quay.io/jwesterl/scar-atlantis:latest \
+#     --param tool-cmd="python3 -m atlantis.scan --target \$SANDBOX_SRC" \
+#     ...
+
+FROM quay.io/jwesterl/scar-agent:latest
+
+# Install the third-party OSS-CRS tool.
+# Replace this block with the actual tool's install steps.
+#
+# Option 1: pip-installable tool
+# RUN pip3 install --no-cache-dir atlantis-scanner==1.2.3
+#
+# Option 2: git clone + pip install
+# RUN git clone --depth=1 --branch v1.2.3 \
+#     https://github.com/team-atlantis/scanner /opt/atlantis \
+#  && pip3 install --no-cache-dir -r /opt/atlantis/requirements.txt
+#
+# Option 3: pre-built binary
+# COPY --from=their-registry/tool:latest /usr/local/bin/tool /usr/local/bin/tool
+#
+# The tool must call libCRS.submit('bug-candidate', file) to emit findings.
+# PYTHONPATH already includes /app/scar/libCRS_bridge (set in the base image)
+# so 'import libCRS' resolves to the bridge automatically.
