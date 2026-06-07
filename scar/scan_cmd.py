@@ -38,6 +38,11 @@ def main() -> None:
                 if e.get("file") and e.get("directory")
             }
             c_files = [f for f in all_c_files if str(f.resolve()) in ccdb_files]
+            # Secondary filter: exclude fuzzer harnesses and test drivers even if
+            # bear captured them in the CCDB (e.g. from a combined compile+link step).
+            c_files = [f for f in c_files if "fuzz" not in f.name.lower()
+                       and not any(p in ("test", "tests", "fuzzer", "fuzzers")
+                                   for p in f.parts)]
             print(f"[llm-scan] {len(c_files)} C file(s) to scan (filtered by compile_commands.json)", flush=True)
         except Exception:
             c_files = all_c_files
