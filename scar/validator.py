@@ -90,7 +90,12 @@ def _compile_flags_and_cwd(source_path: Path, repo_root: Path | None) -> tuple[l
                     if entry.get("file") and entry.get("directory") and \
                             (Path(entry["directory"]) / entry["file"]).resolve() == resolved:
                         build_cwd = Path(entry.get("directory", fallback_cwd))
-                        parts = shlex.split(entry.get("command", ""))
+                        # LLVM spec allows "command" (string) or "arguments" (list).
+                        # bear 3.x writes "arguments"; bear 2.x writes "command".
+                        if "arguments" in entry:
+                            parts = entry["arguments"]
+                        else:
+                            parts = shlex.split(entry.get("command", ""))
                         flags: list[str] = []
                         i = 0
                         while i < len(parts):

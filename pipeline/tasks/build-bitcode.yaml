@@ -109,7 +109,12 @@ spec:
                 entry = ccdb_map.get(str(f.resolve()))
                 flags, build_cwd = [], str(f.parent)
                 if entry:
-                    parts = shlex.split(entry.get("command", ""))
+                    # LLVM spec allows either "command" (string) or "arguments" (list).
+                    # bear 3.x writes "arguments"; bear 2.x writes "command".
+                    if "arguments" in entry:
+                        parts = entry["arguments"]
+                    else:
+                        parts = shlex.split(entry.get("command", ""))
                     i = 1
                     while i < len(parts):
                         p = parts[i]
