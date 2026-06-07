@@ -70,6 +70,10 @@ spec:
       env:
         - name: SCAR_WORKSPACE
           value: $(workspaces.source.path)
+        - name: SCAR_SRC
+          value: $(workspaces.source.path)/$(params.source-dir)
+        - name: SANDBOX_SRC
+          value: /tmp/osscrs-sandbox
         - name: PYTHONPATH
           value: $(workspaces.source.path)/.scar/libCRS_bridge
       script: |

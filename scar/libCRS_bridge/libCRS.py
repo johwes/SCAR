@@ -23,12 +23,36 @@ def _scar_dir() -> Path:
     return d
 
 
+def _remap_path(raw: str) -> str:
+    """Translate a sandbox-absolute path back to its persistent PVC location.
+
+    Tools run against a sandboxed copy of the source under SANDBOX_SRC
+    (/tmp/osscrs-sandbox by default). The repair-loop runs in a separate
+    container that has no access to /tmp of the scanner step, so any path
+    starting with SANDBOX_SRC must be remapped to the actual PVC location.
+
+    SCAR_SRC is the full source path including source-dir (e.g.
+    /workspace/source/multifile) — the directory that was copied into the
+    sandbox. Using SCAR_SRC rather than SCAR_WORKSPACE ensures the mapping
+    is correct when source-dir is a subdirectory of the workspace.
+    """
+    # SCAR_SRC = workspace + source-dir, e.g. /workspace/source/multifile
+    src_root     = Path(os.environ.get("SCAR_SRC", os.environ.get("SCAR_WORKSPACE", "."))).resolve()
+    sandbox_root = Path(os.environ.get("SANDBOX_SRC", "/tmp/osscrs-sandbox")).resolve()
+
+    resolved = Path(raw).resolve()
+    if sandbox_root in resolved.parents or resolved == sandbox_root:
+        return str(src_root / resolved.relative_to(sandbox_root))
+    return str(resolved)
+
+
 def submit(data_type: str, file_path: str) -> None:
     """Intercept a libCRS submission and route it based on data_type.
 
     bug-candidate / pov:
         Translate the OSS-CRS vulnerability payload to SCAR's findings schema
         and drop it in .scar/ so the repair-loop picks it up automatically.
+        Sandbox paths are remapped to the persistent PVC location.
 
     patch:
         SCAR itself calls this after accepting a patch. In Tekton mode the
@@ -56,15 +80,17 @@ def submit(data_type: str, file_path: str) -> None:
         findings.append({
             "rule_id":   bug.get("cwe", "CWE-UNKNOWN"),
             "severity":  bug.get("severity", "high"),
-            "file_path": bug.get("file", "unknown.c"),
+            "file_path": _remap_path(bug.get("file", "unknown.c")),
             "line":      int(bug.get("line", 0)),
             "column":    0,
             "message":   bug.get("description", "Vulnerability found by OSS-CRS tool"),
         })
 
-    out = _scar_dir() / f"findings-osscrs-{int(time.time())}.json"
+    # time.time_ns() guarantees collision-free filenames even when a tool
+    # fires multiple submit() calls within the same wall-clock second.
+    out = _scar_dir() / f"findings-osscrs-{time.time_ns()}.json"
     out.write_text(json.dumps(findings, indent=2))
-    print(f"[libCRS] {len(findings)} finding(s) → {out}")
+    print(f"[libCRS] {len(findings)} finding(s) normalized → {out}")
 
 
 def register_submit_dir(data_type: str, path: str) -> None:
