@@ -63,6 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     make \
     bear \
+    curl \
     libsqlite3-0 \
     libgmp10 \
     libgmpxx4ldbl \
@@ -73,6 +74,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libedit2 \
     libtbb12 \
     python3 \
+ && curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+    -o /usr/local/bin/yq \
+ && chmod +x /usr/local/bin/yq \
  && rm -rf /var/lib/apt/lists/* \
  && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 14 \
  && update-alternatives --install /usr/bin/llvm-link llvm-link /usr/bin/llvm-link-14 14
