@@ -61,4 +61,4 @@ def generate(
         {"role": "user", "content": user_content},
     ]
 
-    return llm.chat(messages, temperature=0.1)
+    return llm.chat(messages, model=llm.patch_model(), temperature=0.1)

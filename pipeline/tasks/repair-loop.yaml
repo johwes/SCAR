@@ -29,11 +29,16 @@ spec:
             secretKeyRef:
               name: scar-llm-credentials
               key: api_key
-        - name: LLM_MODEL
+        - name: LLM_PATCH_MODEL
           valueFrom:
             secretKeyRef:
               name: scar-llm-credentials
-              key: model
+              key: patch_model
+        - name: LLM_REVIEW_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: scar-llm-credentials
+              key: review_model
         - name: SCAR_WORKSPACE
           value: $(workspaces.source.path)
       script: |

@@ -93,7 +93,7 @@ def run(
             {"role": "user", "content": user_content},
         ]
 
-        response = llm.chat(messages, temperature=0.2)
+        response = llm.chat(messages, model=llm.review_model(), temperature=0.2)
 
         directives = grep_tool.extract_directives(response)
         if directives:
@@ -116,7 +116,7 @@ def run(
         {"role": "system", "content": ARBITER_PROMPT},
         {"role": "user", "content": arbiter_input},
     ]
-    arbiter_response = llm.chat(arbiter_messages, temperature=0.0)
+    arbiter_response = llm.chat(arbiter_messages, model=llm.review_model(), temperature=0.0)
 
     return _parse_result(arbiter_response, verdicts, rounds)
 

@@ -42,7 +42,7 @@ def generate(
         {"role": "user", "content": f"File: {source_path}\n\n{source}"},
     ]
 
-    briefing = llm.chat(messages, temperature=0.1)
+    briefing = llm.chat(messages, model=llm.patch_model(), temperature=0.1)
 
     directives = grep_tool.extract_directives(briefing)
     if directives:

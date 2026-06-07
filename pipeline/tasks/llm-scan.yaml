@@ -29,11 +29,11 @@ spec:
             secretKeyRef:
               name: scar-llm-credentials
               key: api_key
-        - name: LLM_MODEL
+        - name: LLM_PATCH_MODEL
           valueFrom:
             secretKeyRef:
               name: scar-llm-credentials
-              key: model
+              key: patch_model
       script: |
         #!/bin/bash
         set -euo pipefail

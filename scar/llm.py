@@ -1,8 +1,15 @@
 """OpenAI-compatible LLM client.
 
-Reads LLM_BASE_URL, LLM_API_KEY, and LLM_MODEL from the environment so the
-same code works against any compliant endpoint (LiteLLM proxy, OpenAI,
+Reads LLM_BASE_URL, LLM_API_KEY, and model env vars from the environment so
+the same code works against any compliant endpoint (LiteLLM proxy, OpenAI,
 OpenRouter, local vLLM, etc.).
+
+Two model roles are supported, each with its own env var:
+  LLM_PATCH_MODEL  — used for generation tasks (context, patch synthesis, scan)
+  LLM_REVIEW_MODEL — used for review tasks (triage rounds, arbiter)
+
+Both fall back to LLM_MODEL if the role-specific var is not set, so a single
+LLM_MODEL is sufficient for deployments that use one model for everything.
 """
 
 import os
@@ -24,10 +31,19 @@ def _get_client() -> OpenAI:
     return _client
 
 
-def chat(messages: list[dict], *, temperature: float = 0.2) -> str:
+def patch_model() -> str:
+    """Model for generation tasks: context briefing, patch synthesis, LLM scan."""
+    return os.environ.get("LLM_PATCH_MODEL") or os.environ["LLM_MODEL"]
+
+
+def review_model() -> str:
+    """Model for review tasks: triage rounds and arbiter verdict."""
+    return os.environ.get("LLM_REVIEW_MODEL") or os.environ["LLM_MODEL"]
+
+
+def chat(messages: list[dict], *, model: str, temperature: float = 0.2) -> str:
     """Send a chat completion request and return the response text."""
     global _prompt_tokens, _completion_tokens
-    model = os.environ["LLM_MODEL"]
     response = _get_client().chat.completions.create(
         model=model,
         messages=messages,

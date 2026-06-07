@@ -257,8 +257,15 @@ Create a Kubernetes secret with your OpenAI-compatible LLM endpoint:
 oc create secret generic scar-llm-credentials \
   --from-literal=base_url="https://your-llm-endpoint/v1" \
   --from-literal=api_key="sk-your-api-key" \
-  --from-literal=model="your-model-name"
+  --from-literal=patch_model="your-patch-model-name" \
+  --from-literal=review_model="your-review-model-name"
 ```
+
+`patch_model` is used for generation tasks (context briefing, patch synthesis, LLM scan).
+`review_model` is used for review tasks (triage rounds, arbiter verdict). Using a different
+model for each role improves patch quality — the reviewer brings independent judgment rather
+than being consistent with the generator's own blind spots. If you only have one model,
+set both to the same value.
 
 Any OpenAI-compatible endpoint works: LiteLLM proxy, OpenAI, OpenRouter, vLLM, etc.
 

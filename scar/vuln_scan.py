@@ -113,7 +113,7 @@ def scan(source_path: str | Path, briefing: str, repo_dir: str | Path) -> list[L
         {"role": "user", "content": user_content},
     ]
 
-    response = llm.chat(messages, temperature=0.1)
+    response = llm.chat(messages, model=llm.patch_model(), temperature=0.1)
 
     directives = grep_tool.extract_directives(response)
     if directives:
@@ -124,7 +124,7 @@ def scan(source_path: str | Path, briefing: str, repo_dir: str | Path) -> list[L
                 "role": "user",
                 "content": f"Grep results:\n{grep_results}\n\nRevise your JSON findings if needed.",
             })
-            response = llm.chat(messages, temperature=0.1)
+            response = llm.chat(messages, model=llm.patch_model(), temperature=0.1)
 
     return _parse(response, str(source_path))
 
