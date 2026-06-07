@@ -64,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     bear \
     curl \
+    ca-certificates \
     libsqlite3-0 \
     libgmp10 \
     libgmpxx4ldbl \
