@@ -9,6 +9,68 @@ the exact edits required to `pipeline.yaml`. It does not tell you what to build.
 
 ---
 
+## Why the code lives in two places
+
+You will notice that SCAR has logic in two very different locations:
+
+- **`scar/` Python package** — the repair loop, patch generation, triage, the
+  LLM client, the SARIF bridge, the validator
+- **`pipeline/tasks/*.yaml`** — Tekton task definitions that contain inline bash
+  and Python scripts
+
+This is intentional, and understanding the split will help you decide where your
+own work belongs.
+
+### The Brain: `scar/`
+
+The core analysis and repair logic is platform-agnostic. It has no knowledge of
+Tekton, Kubernetes, or OpenShift. You can run it on a laptop:
+
+```bash
+scar results.sarif /path/to/repo --triage-rounds 5
+```
+
+Because it is a normal Python package it can be unit-tested with `pytest`,
+imported by other tools, and versioned independently of the pipeline. When you
+want to change *how* SCAR analyses or repairs code — the prompts, the triage
+logic, the safety rules — you change the Python package and rebuild the
+container image.
+
+### The Glue: `pipeline/tasks/`
+
+The Tekton task YAML files are responsible for platform plumbing: mounting the
+shared PVC workspace (`$(workspaces.source.path)`), passing pipeline parameters
+between steps, and coordinating parallel tasks. The inline scripts in these
+files orchestrate external binaries (`llvm-link`, `ikos`, `ikos-report`, `bear`)
+that live in the container image and have no place in a general-purpose Python
+library.
+
+When you want to *wire a new tool into the pipeline* — point it at the right
+workspace paths, make it write a `findings-<name>.json`, add it to
+`pipeline.yaml` — you work in the task YAML. The Brain does not need to change
+at all.
+
+### The honest exception
+
+The `emit-llvm` step in `build-bitcode.yaml` is a pragmatic exception. It
+contains real domain logic — CCDB parsing, build system detection, clang
+invocation — that is not Tekton-specific and could live in `scar/build_cmd.py`.
+It ended up inline in the YAML early in the project's life and has not been
+moved. If you notice this and find it jarring, you are asking the right question.
+Real systems have these exceptions; recognising them is part of the job.
+
+### Where your work belongs
+
+| I want to… | Work here |
+|---|---|
+| Change how patches are generated or validated | `scar/patch_gen.py`, `scar/validator.py` |
+| Change how the LLM prompt is structured | `scar/context_gen.py`, `scar/triage.py` |
+| Add a new static analyser or fuzzer | New Tekton task YAML + findings schema |
+| Change how findings from different tools are merged | `scar/__main__.py` |
+| Add a new pipeline parameter or workspace | `pipeline/pipeline.yaml` |
+
+---
+
 ## How the pipeline is structured
 
 ```
