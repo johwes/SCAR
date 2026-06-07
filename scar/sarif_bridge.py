@@ -25,7 +25,16 @@ class IkosSarifBridge:
         self.sarif_path = Path(sarif_path)
         self.repo_root = Path(repo_root)
 
-    def parse(self) -> list[Finding]:
+    def parse(self, min_level: str = "error") -> list[Finding]:
+        """Parse SARIF findings, keeping only those at or above min_level.
+
+        IKOS levels: error (definite unsafe) > warning (over-approximation) > note.
+        Default is "error" — only mathematically proven bugs, no false-positive
+        warnings from abstract interpretation widening.
+        """
+        _rank = {"error": 2, "warning": 1, "note": 0, "none": 0}
+        threshold = _rank.get(min_level, 2)
+
         if not self.sarif_path.exists():
             raise FileNotFoundError(f"SARIF report not found: {self.sarif_path}")
 
@@ -35,8 +44,10 @@ class IkosSarifBridge:
         findings: list[Finding] = []
         for run in data.get("runs", []):
             for result in run.get("results", []):
-                for finding in self._extract(result):
-                    findings.append(finding)
+                level = result.get("level", "warning")
+                if _rank.get(level, 0) >= threshold:
+                    for finding in self._extract(result):
+                        findings.append(finding)
         return findings
 
     def _extract(self, result: dict) -> list[Finding]:
