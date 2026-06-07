@@ -241,6 +241,9 @@ tkn pipeline start scar \
 AIxCC contestant tools (scanners that implement the libCRS API) can be plugged directly
 into the `osscrs-scan` task using Pattern A or Pattern B — see above.
 
+For a step-by-step guide to writing and testing your own OSS-CRS tool, see
+[`docs/osscrs-tool-guide.md`](docs/osscrs-tool-guide.md).
+
 ## Configuration
 
 Create a Kubernetes secret with your OpenAI-compatible LLM endpoint:
