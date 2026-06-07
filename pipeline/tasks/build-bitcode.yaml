@@ -24,7 +24,26 @@ spec:
 
         mkdir -p "$BCDIR"
 
+        # bear_run <label> <bear-args...> -- <cmd>
+        # Runs bear, then promotes compile_commands.json from either the --output
+        # path (bear 3.x) or the current-directory fallback (bear 2.x) to $CCDB.
+        bear_run() {
+          local label="$1"; shift
+          bear "$@" 2>&1 | tail -5 || true
+          # bear 2.x fallback: may have written to ./compile_commands.json instead
+          if [ ! -f "$CCDB" ] && [ -f "$SRC/compile_commands.json" ]; then
+            mv "$SRC/compile_commands.json" "$CCDB"
+          fi
+          if [ -f "$CCDB" ] && [ -s "$CCDB" ]; then
+            echo "compile_commands.json generated from ${label} ($(wc -l < "$CCDB") lines)"
+          else
+            echo "WARNING: bear did not produce compile_commands.json for ${label}"
+          fi
+        }
+
         # Generate compile_commands.json so the validator can use exact per-file flags.
+        # Prefer build.sh over Makefile when both exist: build.sh is the OSS-Fuzz path
+        # designed for this pipeline; Makefile may use sanitizer flags that need a runtime.
         if [ -f "$SRC/CMakeLists.txt" ]; then
           echo "Detected CMakeLists.txt — extracting compile commands via cmake"
           cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B "$BCDIR/cmake-build" "$SRC" 2>&1 | tail -3 || true
@@ -32,17 +51,10 @@ spec:
             cp "$BCDIR/cmake-build/compile_commands.json" "$CCDB"
             echo "compile_commands.json generated from CMake ($(wc -l < "$CCDB") lines)"
           fi
-        elif [ -f "$SRC/Makefile" ]; then
-          echo "Detected Makefile — capturing compile commands via bear"
-          cd "$SRC" && bear --output "$CCDB" -- make 2>&1 | tail -3 || true
-          if [ -f "$CCDB" ]; then
-            echo "compile_commands.json generated from bear+make ($(wc -l < "$CCDB") lines)"
-          fi
         elif [ -f "$SRC/build.sh" ]; then
           echo "Detected OSS-Fuzz build.sh — capturing compile commands via bear"
           # Set the standard OSS-Fuzz environment so build.sh runs correctly.
           # Disable sanitizers/fuzzing instrumentation; we want plain clang output.
-          # Use OUT/WORK/SRC as OSS-Fuzz expects; BCDIR is kept separate for bitcode.
           export SRC="$SRC"
           export WORK="$WS/.scar/oss-work"
           export OUT="$WS/.scar/oss-out"
@@ -53,10 +65,10 @@ spec:
           export LIB_FUZZING_ENGINE="-lFuzzer"
           export SANITIZER=none
           mkdir -p "$WORK" "$OUT"
-          cd "$SRC" && bear --output "$CCDB" -- bash build.sh 2>&1 | tail -5 || true
-          if [ -f "$CCDB" ]; then
-            echo "compile_commands.json generated from OSS-Fuzz build.sh ($(wc -l < "$CCDB") lines)"
-          fi
+          cd "$SRC" && bear_run "OSS-Fuzz build.sh" --output "$CCDB" -- bash build.sh
+        elif [ -f "$SRC/Makefile" ]; then
+          echo "Detected Makefile — capturing compile commands via bear"
+          cd "$SRC" && bear_run "bear+make" --output "$CCDB" -- make
         else
           echo "No build system detected — validator will use -I parent fallback"
         fi
