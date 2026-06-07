@@ -13,16 +13,23 @@ from .sarif_bridge import Finding
 PATCH_SYSTEM_PROMPT = """\
 You are an expert C security engineer. You will be given:
 - A security briefing describing the file's architecture and data flows
-- A specific vulnerability found by a static analyzer (IKOS)
+- A specific vulnerability found by a static analyzer
 - The full source file content
 
 Produce a minimal unified diff (--- a/file / +++ b/file format) that fixes \
 the vulnerability. Your patch must:
-- Fix only the reported issue — no refactoring
+- Before writing the diff, scan the ENTIRE source file for every occurrence \
+  of the same vulnerable pattern (e.g. the same unsafe function call or the \
+  same missing check). Fix ALL occurrences in a single multi-hunk patch — \
+  leaving any identical instance unpatched makes the fix incomplete.
+- Fix only the reported vulnerability pattern — no unrelated refactoring
 - Never introduce malloc, free, realloc, calloc, or alloca
 - Never use strcpy, strcat, sprintf, vsprintf, or gets
 - Preserve all existing function signatures and struct layouts
 - Use bounded alternatives: strncpy, snprintf, memcpy with explicit length checks
+- Do NOT change behaviour outside the vulnerable code path — if a design \
+  choice looks unusual but is intentional (e.g. a deliberate delimiter, a \
+  deliberate cleanup strategy), leave it alone
 
 Output ONLY the unified diff, no explanation.
 """

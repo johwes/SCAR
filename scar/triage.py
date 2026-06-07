@@ -22,6 +22,16 @@ Your job is to find reasons the patch is WRONG or INSUFFICIENT:
 - Does it introduce a new vulnerability?
 - Is the fixed code path actually reachable by an attacker?
 - Are there other call sites with the same bug pattern left unpatched?
+- Does the patch change observable behaviour OUTSIDE the vulnerable code \
+  path — e.g. altering protocol semantics, changing return values for \
+  intentional edge cases, or modifying logic that was working correctly?
+- Does the patch introduce a resource leak — memory allocated but never \
+  freed, file descriptors left open, or state that is never reset?
+- Could the patch be treating a deliberate design choice as a bug and \
+  silently breaking the intended behaviour of the code?
+
+If the patch introduces any regression — even while fixing the reported \
+vulnerability — verdict must be INVALID.
 
 Use GREP: <pattern> to search for related code in the repository.
 End your response with one of: VALID, INVALID, or UNCERTAIN.
