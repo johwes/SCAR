@@ -106,7 +106,13 @@ def _compile_flags_and_cwd(source_path: Path, repo_root: Path | None) -> tuple[l
                         return flags, build_cwd
             except Exception:
                 pass
-    return [f"-I{fallback_cwd}"], fallback_cwd
+    fallback_flags = [f"-I{fallback_cwd}"]
+    if repo_root:
+        for inc_name in ("include", "inc"):
+            inc_dir = Path(repo_root) / inc_name
+            if inc_dir.is_dir():
+                fallback_flags.append(f"-I{inc_dir}")
+    return fallback_flags, fallback_cwd
 
 
 def _apply_patch(source: str, patch: str, filename: str) -> str | None:
