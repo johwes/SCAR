@@ -12,7 +12,7 @@ spec:
     - name: source
       description: Shared workspace containing the target C repository
   steps:
-    - name: emit-llvm
+    - name: detect-build-system
       image: quay.io/jwesterl/scar-ikos:latest
       script: |
         #!/bin/bash
@@ -61,67 +61,66 @@ spec:
           echo "No build system detected — validator will use -I parent fallback"
         fi
 
-        # Emit LLVM bitcode for each .c file under SRC.
-        # When compile_commands.json is available, use its per-file flags (e.g. -Iinclude)
-        # so that multi-file projects with shared headers compile correctly.
-        # Without it, attempt standalone compilation and skip files with unresolvable headers.
-        if [ -f "$CCDB" ]; then
-          echo "Emitting bitcode using compile_commands.json flags"
-          cat > /tmp/scar_bitcode.py << 'PYEOF'
-import json, subprocess, os, shlex
-from pathlib import Path
+    - name: emit-llvm
+      image: quay.io/jwesterl/scar-ikos:latest
+      script: |
+        #!/usr/bin/env python3
+        import json, subprocess, shlex
+        from pathlib import Path
 
-ccdb_path = os.environ['CCDB']
-bcdir     = os.environ['BCDIR']
-src       = os.environ['SRC']
+        ws    = "$(workspaces.source.path)"
+        src   = ws + "/$(params.source-dir)"
+        bcdir = ws + "/.scar/bitcode"
+        ccdb_path = ws + "/.scar/compile_commands.json"
 
-entries  = json.load(open(ccdb_path))
-ccdb_map = {str(Path(e['file']).resolve()): e for e in entries if e.get('file')}
+        Path(bcdir).mkdir(parents=True, exist_ok=True)
+        src_path = Path(src).resolve()
 
-for f in sorted(Path(src).resolve().rglob('*.c')):
-    rel = f.relative_to(Path(src).resolve())
-    bc  = Path(bcdir) / rel.parent / (rel.stem + '.bc')
-    bc.parent.mkdir(parents=True, exist_ok=True)
+        if Path(ccdb_path).exists():
+            print("Emitting bitcode using compile_commands.json flags", flush=True)
+            entries  = json.load(open(ccdb_path))
+            ccdb_map = {str(Path(e["file"]).resolve()): e for e in entries if e.get("file")}
 
-    entry = ccdb_map.get(str(f))
-    flags, build_cwd = [], str(f.parent)
-    if entry:
-        parts = shlex.split(entry.get('command', ''))
-        i = 1
-        while i < len(parts):
-            p = parts[i]
-            if p in ('-I', '-D', '-isystem', '-iquote') and i + 1 < len(parts):
-                flags += [p, parts[i + 1]]; i += 2
-            elif p.startswith(('-I', '-D', '-isystem', '-iquote', '-std=')):
-                flags.append(p); i += 1
-            else:
-                i += 1
-        build_cwd = entry.get('directory', build_cwd)
+            for f in sorted(src_path.rglob("*.c")):
+                rel = f.relative_to(src_path)
+                bc  = Path(bcdir) / rel.parent / (rel.stem + ".bc")
+                bc.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = ['clang', '-c', '-emit-llvm', '-g', '-O0', '-Xclang', '-disable-O0-optnone'] \
-          + flags + ['-o', str(bc), str(f)]
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=build_cwd)
-    if r.returncode == 0:
-        print(f'bitcode: {bc}', flush=True)
-    else:
-        err = r.stderr.splitlines()[0] if r.stderr else 'clang error'
-        print(f'skip: {f} ({err})', flush=True)
-PYEOF
-          export CCDB BCDIR SRC
-          python3 /tmp/scar_bitcode.py
-        else
-          find "$SRC" -name "*.c" | while read -r f; do
-            rel="${f#$SRC/}"
-            bc="$BCDIR/${rel%.c}.bc"
-            mkdir -p "$(dirname "$bc")"
-            if clang -c -emit-llvm -g -O0 \
-                 -Xclang -disable-O0-optnone \
-                 "$f" -o "$bc" 2>/dev/null; then
-              echo "bitcode: $bc"
-            else
-              echo "skip: $f (missing headers — use source-dir= to scope to a sub-project with its own build system)"
-            fi
-          done
-        fi
+                entry = ccdb_map.get(str(f))
+                flags, build_cwd = [], str(f.parent)
+                if entry:
+                    parts = shlex.split(entry.get("command", ""))
+                    i = 1
+                    while i < len(parts):
+                        p = parts[i]
+                        if p in ("-I", "-D", "-isystem", "-iquote") and i + 1 < len(parts):
+                            flags += [p, parts[i + 1]]; i += 2
+                        elif p.startswith(("-I", "-D", "-isystem", "-iquote", "-std=")):
+                            flags.append(p); i += 1
+                        else:
+                            i += 1
+                    build_cwd = entry.get("directory", build_cwd)
 
-        echo "bitcode compilation complete"
+                cmd = ["clang", "-c", "-emit-llvm", "-g", "-O0", "-Xclang", "-disable-O0-optnone"] \
+                      + flags + ["-o", str(bc), str(f)]
+                r = subprocess.run(cmd, capture_output=True, text=True, cwd=build_cwd)
+                if r.returncode == 0:
+                    print(f"bitcode: {bc}", flush=True)
+                else:
+                    err = r.stderr.splitlines()[0] if r.stderr else "clang error"
+                    print(f"skip: {f} ({err})", flush=True)
+        else:
+            print("No compile_commands.json — attempting standalone compilation", flush=True)
+            for f in sorted(src_path.rglob("*.c")):
+                rel = f.relative_to(src_path)
+                bc  = Path(bcdir) / rel.parent / (rel.stem + ".bc")
+                bc.parent.mkdir(parents=True, exist_ok=True)
+                cmd = ["clang", "-c", "-emit-llvm", "-g", "-O0",
+                       "-Xclang", "-disable-O0-optnone", "-o", str(bc), str(f)]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode == 0:
+                    print(f"bitcode: {bc}", flush=True)
+                else:
+                    print(f"skip: {f} (missing headers — use source-dir= to scope to a sub-project with its own build system)", flush=True)
+
+        print("bitcode compilation complete", flush=True)
