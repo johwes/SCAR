@@ -20,16 +20,22 @@ spec:
 
         find "$BCDIR" -name "*.bc" | while read -r bc; do
           name="$(basename "${bc%.bc}")"
+
+          # Skip fuzzer harness — it has no main() and no regular API entry points.
+          if echo "$name" | grep -qi "fuzz"; then
+            echo "skip (fuzzer harness): $bc"
+            continue
+          fi
+
           db="$WS/.scar/${name}.db"
           sarif="$SARIF_DIR/${name}.sarif"
 
           echo "analyzing: $bc"
 
           # Derive entry points from the bitcode's exported text symbols.
-          # Full executables expose 'main'; library objects expose their API.
-          # Using llvm-nm avoids hard-coding function names per project.
-          entry_pts=$(llvm-nm --defined-only --extern-only "$bc" 2>/dev/null \
-            | awk '$2 == "T" { print $3 }' | paste -sd, - || true)
+          # --format=posix gives: name type value [size] — $1=name, $2=type.
+          entry_pts=$(llvm-nm --defined-only --extern-only --format=posix "$bc" 2>/dev/null \
+            | awk '$2 == "T" { print $1 }' | paste -sd, - || true)
           if [ -z "$entry_pts" ]; then
             entry_pts="main"
           fi
