@@ -1,0 +1,51 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-osscrs-scan
+spec:
+  description: >
+    Run an OSS-CRS-compatible third-party scanner against the C source and
+    collect its findings via the libCRS bridge. The bridge intercepts
+    libCRS.submit() calls and writes .scar/findings-osscrs-<ts>.json, which
+    the repair-loop discovers automatically via the pluggable findings convention.
+
+    The source is sandboxed into /tmp/osscrs-sandbox before the tool runs so
+    that any destructive verification steps (patching, rebuilding) do not
+    corrupt the shared PVC workspace for parallel analyzers.
+  params:
+    - name: source-dir
+      description: Path within the workspace containing C source files
+      default: "."
+    - name: tool-cmd
+      description: >
+        Command to execute the OSS-CRS-compatible scanner.
+        The sandbox source root is available as $SANDBOX_SRC.
+        Example: "python3 /usr/local/bin/atlantis-scan --target $SANDBOX_SRC"
+      default: "echo 'No tool-cmd configured — skipping OSS-CRS scan'"
+  workspaces:
+    - name: source
+      description: Shared workspace containing the cloned C repository
+  steps:
+    - name: run-scanner
+      image: quay.io/jwesterl/scar-agent:latest
+      env:
+        - name: SCAR_WORKSPACE
+          value: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+        SRC="$WS/$(params.source-dir)"
+        SANDBOX="/tmp/osscrs-sandbox"
+
+        # Sandbox the source so the tool cannot pollute the shared PVC.
+        rm -rf "$SANDBOX"
+        cp -r "$SRC" "$SANDBOX"
+        export SANDBOX_SRC="$SANDBOX"
+
+        mkdir -p "$WS/.scar"
+
+        echo "[osscrs-scan] Running: $(params.tool-cmd)"
+        eval "$(params.tool-cmd)" || true
+
+        echo "[osscrs-scan] Done"

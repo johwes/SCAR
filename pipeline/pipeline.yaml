@@ -71,10 +71,21 @@ spec:
         - name: source-dir
           value: $(params.source-dir)
 
+    - name: osscrs-scan
+      taskRef:
+        name: scar-osscrs-scan
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
     - name: repair-loop
       taskRef:
         name: scar-repair-loop
-      runAfter: [ikos-analyze, llm-scan]
+      runAfter: [ikos-analyze, llm-scan, osscrs-scan]
       workspaces:
         - name: source
           workspace: shared-data

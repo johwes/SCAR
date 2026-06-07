@@ -20,5 +20,10 @@ COPY scar/ scar/
 
 RUN pip3 install --no-cache-dir -e .
 
+# Make libCRS importable as a top-level module so that any OSS-CRS-compatible
+# third-party scanner that calls `import libCRS` gets our bridge instead of
+# the real CRS sidecar, without any changes to the upstream tool's code.
+ENV PYTHONPATH="/app/scar/libCRS_bridge:${PYTHONPATH:-}"
+
 WORKDIR /workspace
 ENTRYPOINT ["python3", "-m", "scar"]
