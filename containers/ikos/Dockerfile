@@ -61,6 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     llvm-14-tools \
     cppcheck \
     cmake \
+    make \
     bear \
     libsqlite3-0 \
     libgmp10 \
