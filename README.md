@@ -299,10 +299,24 @@ runs for that team), then fastest single-run time.
 podman build -t quay.io/jwesterl/scar-dashboard:latest containers/dashboard/
 podman push quay.io/jwesterl/scar-dashboard:latest
 
-# Deploy on the cluster
+# Create the PVC for the SQLite database (survives pod restarts)
+oc apply -f containers/dashboard/pvc.yaml
+
+# Deploy and expose
 oc new-app --image=quay.io/jwesterl/scar-dashboard:latest --name=scar-dashboard
 oc expose svc/scar-dashboard
+
+# Mount the PVC and point DB_PATH at it
+oc set volume deployment/scar-dashboard \
+  --add --name=db \
+  --type=persistentVolumeClaim \
+  --claim-name=scar-dashboard-db \
+  --mount-path=/data
+oc set env deployment/scar-dashboard DB_PATH=/data/dashboard.db
 ```
+
+Without the PVC the dashboard falls back to `/tmp/dashboard.db` and works fine,
+but data is lost if the pod restarts. For the workshop, the PVC is recommended.
 
 Pipeline pods run inside the cluster, so the ConfigMap should point to the
 **internal service DNS name** rather than the public Route. This avoids external
