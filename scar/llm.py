@@ -13,7 +13,12 @@ LLM_MODEL is sufficient for deployments that use one model for everything.
 """
 
 import os
+import time
+
 from openai import OpenAI
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 3.0  # seconds; doubled each attempt
 
 _client: OpenAI | None = None
 
@@ -42,17 +47,35 @@ def review_model() -> str:
 
 
 def chat(messages: list[dict], *, model: str, temperature: float = 0.2) -> str:
-    """Send a chat completion request and return the response text."""
+    """Send a chat completion request and return the response text.
+
+    Retries up to _MAX_RETRIES times with exponential backoff on transient
+    network errors (server disconnect, connection reset, timeout).
+    """
     global _prompt_tokens, _completion_tokens
-    response = _get_client().chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-    )
-    if response.usage:
-        _prompt_tokens += response.usage.prompt_tokens
-        _completion_tokens += response.usage.completion_tokens
-    return response.choices[0].message.content or ""
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = _get_client().chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+            if response.usage:
+                _prompt_tokens += response.usage.prompt_tokens
+                _completion_tokens += response.usage.completion_tokens
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                print(
+                    f"[llm] transient error ({exc.__class__.__name__}), "
+                    f"retrying in {delay:.0f}s (attempt {attempt + 1}/{_MAX_RETRIES})",
+                    flush=True,
+                )
+                time.sleep(delay)
+    raise last_exc
 
 
 def get_usage() -> dict:
