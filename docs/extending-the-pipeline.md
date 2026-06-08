@@ -67,7 +67,25 @@ Real systems have these exceptions; recognising them is part of the job.
 | Change how the LLM prompt is structured | `scar/context_gen.py`, `scar/triage.py` |
 | Add a new static analyser or fuzzer | New Tekton task YAML + findings schema |
 | Change how findings from different tools are merged | `scar/__main__.py` |
-| Add a new pipeline parameter or workspace | `pipeline/pipeline.yaml` |
+| Add a new pipeline parameter or workspace | `pipeline/pipeline-v3-extended.yaml` |
+
+---
+
+## Pipeline variants
+
+Three pipeline definitions ship with SCAR, each building on the previous:
+
+| File | Name | What runs |
+|---|---|---|
+| `pipeline/pipeline-v1-llm-only.yaml` | `scar-v1` | clone → build-bitcode → llm-scan → repair-loop → submit |
+| `pipeline/pipeline-v2-full.yaml` | `scar-v2` | + IKOS static analysis + OSS-CRS scan in parallel |
+| `pipeline/pipeline-v3-extended.yaml` | `scar-v3` | + two pre-wired stub slots for you to fill in |
+
+**If you are here to add a new tool, start with v3.** The two stub tasks
+(`pipeline/tasks/scar-stub-fuzzer.yaml` and `pipeline/tasks/scar-stub-custom-scan.yaml`)
+are already wired into the pipeline and write empty findings files. Replace the
+body of either stub with your tool logic, `oc apply` the task YAML, and run
+`scar-v3` — no pipeline YAML edits required.
 
 ---
 
@@ -76,10 +94,11 @@ Real systems have these exceptions; recognising them is part of the job.
 ```
 clone
   └─> build-bitcode
-          ├─> ikos-analyze   ─┐
-          ├─> llm-scan        ├─> repair-loop ─> submit-results
-          ├─> osscrs-scan    ─┘
-          └─> [your task]   ─┘  ← plug in here
+          ├─> ikos-analyze       ─┐
+          ├─> llm-scan            ├─> repair-loop ─> submit-results
+          ├─> osscrs-scan         │
+          ├─> fuzzer-stub        ─┤  ← replace with your fuzzer
+          └─> custom-scan-stub   ─┘  ← replace with your analyser
 ```
 
 All analysis tasks run **in parallel** after `build-bitcode`. The `repair-loop`
@@ -220,11 +239,25 @@ the same filesystem — useful if you need a build step before an analysis step.
 
 ## Wiring your task into the pipeline
 
-Two edits to `pipeline/pipeline.yaml`:
+### Option A — Use the v3 stub slots (recommended)
 
-### 1. Add your task to the `tasks` list
+The v3 pipeline ships with two stub tasks already wired in. Replace the body of
+`pipeline/tasks/scar-stub-fuzzer.yaml` or `pipeline/tasks/scar-stub-custom-scan.yaml`
+with your tool logic, then apply just the task:
 
-Add it at the same level as `ikos-analyze`, `llm-scan`, and `osscrs-scan`:
+```bash
+oc apply -f pipeline/tasks/scar-stub-fuzzer.yaml   # or scar-stub-custom-scan.yaml
+```
+
+No pipeline YAML changes needed — the stub is already in `repair-loop`'s
+`runAfter` list.
+
+### Option B — Wire a brand-new task from scratch
+
+If you need a third slot, or are working against a different pipeline variant,
+make two edits to the pipeline YAML:
+
+**1. Add your task to the `tasks` list** at the same level as `ikos-analyze`:
 
 ```yaml
     - name: <name>
@@ -239,31 +272,27 @@ Add it at the same level as `ikos-analyze`, `llm-scan`, and `osscrs-scan`:
           value: $(params.source-dir)    # omit if your task has no source-dir param
 ```
 
-### 2. Add your task to `repair-loop`'s `runAfter`
-
-Find the `repair-loop` task entry and extend its `runAfter` list:
+**2. Add your task to `repair-loop`'s `runAfter`:**
 
 ```yaml
     - name: repair-loop
       ...
-      runAfter: [ikos-analyze, llm-scan, osscrs-scan, <name>]  # ← add here
+      runAfter: [ikos-analyze, llm-scan, osscrs-scan, fuzzer-stub, custom-scan-stub, <name>]
 ```
-
-This ensures the repair loop waits for your findings before it starts processing.
 
 ---
 
 ## Applying your changes to the cluster
 
 ```bash
-# Apply the new task definition
+# Apply your task definition (always needed)
 oc apply -f pipeline/tasks/scar-<name>.yaml
 
-# Apply the updated pipeline
-oc apply -f pipeline/pipeline.yaml
+# Apply the pipeline only if you edited pipeline YAML (Option B)
+oc apply -f pipeline/pipeline-v3-extended.yaml
 
 # Run
-tkn pipeline start scar \
+tkn pipeline start scar-v3 \
   --param repo-url=<target-repo> \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
