@@ -372,7 +372,7 @@ def build_dashboard() -> str:
     </p>
   </main>
 
-  <footer>SCAR &mdash; Static C Analysis &amp; Repair &nbsp;|&nbsp; Chalmers Workshop</footer>
+  <footer>SCAR &mdash; Static C Analysis &amp; Repair &nbsp;|&nbsp; Workshop</footer>
 </body>
 </html>"""
 
