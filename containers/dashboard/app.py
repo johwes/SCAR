@@ -221,7 +221,7 @@ def build_dashboard() -> str:
         """).fetchall()
 
         all_runs = db.execute("""
-            SELECT team_id, submitted_at, score, accepted_patches, unique_cwes,
+            SELECT team_id, submitted_at, repo_url, score, accepted_patches, unique_cwes,
                    tool_diversity, total_tokens, execution_seconds
             FROM runs
             ORDER BY submitted_at DESC
@@ -280,6 +280,7 @@ def build_dashboard() -> str:
         <tr>
           <td class="muted">{_fmt_ts(r['submitted_at'])}</td>
           <td><a class="team-link" href="/runs/{r['team_id']}">{r['team_id']}</a></td>
+          <td class="repo muted">{_short_repo(r['repo_url'])}</td>
           <td class="center score">{r['score']}</td>
           <td class="center">{r['accepted_patches']}</td>
           <td class="center">{r['unique_cwes']}</td>
@@ -288,7 +289,7 @@ def build_dashboard() -> str:
           <td class="center">{_fmt_time(r['execution_seconds'])}</td>
         </tr>"""
     if not history_html:
-        history_html = '<tr><td colspan="8" class="center muted">No runs yet</td></tr>'
+        history_html = '<tr><td colspan="9" class="center muted">No runs yet</td></tr>'
 
     s = dict(stats) if stats else {}
     cluster_prompt     = _fmt_tokens(s.get("cluster_prompt_tokens") or 0)
@@ -408,6 +409,7 @@ def build_dashboard() -> str:
             <tr>
               <th>Submitted</th>
               <th>Team</th>
+              <th>Repo</th>
               <th>Score</th>
               <th>Patches</th>
               <th>CWEs</th>
