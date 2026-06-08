@@ -224,30 +224,13 @@ compilation.
 | `src/process.c` | CWE-476 | `nullity` | detected |
 | `src/output.c` | CWE-369 | `dbz` | detected |
 
-### AIxCC challenge projects
+### Pluggable Ecosystem Testing
 
-The [DARPA AI Cyber Challenge](https://aicyberchallenge.com/) (AIxCC) open-sourced its
-competition targets — real-world C codebases with synthetic CVEs injected. These make
-good end-to-end test targets for SCAR.
+To validate SCAR's ability to ingest external vulnerabilities, you can leverage any third-party tool designed for the OpenSSF OSS-CRS framework (such as fuzzers, symbolic execution engines, or specialized static analyzers that competed in DARPA's AIxCC).
 
-| Project | Description |
-|---|---|
-| [`aixcc-public/challenge-004-nginx-cp`](https://github.com/aixcc-public/challenge-004-nginx-cp) | Nginx with synthetic vulnerability injections |
-| [`aixcc-public/challenge-001`](https://github.com/aixcc-public/challenge-001) | Linux kernel challenge project |
+By utilizing **Pattern B runtime injection**, you can point SCAR directly at an unmodified upstream container image of an external tool, set the corresponding parameters, and verify that the `libCRS` bridge seamlessly captures, normalizes, and patches the foreign findings tracker.
 
-```bash
-# Scan an AIxCC challenge project
-tkn pipeline start scar \
-  --param repo-url=https://github.com/aixcc-public/challenge-004-nginx-cp \
-  --workspace name=shared-data,claimName=scar-pvc \
-  --showlog
-```
-
-AIxCC contestant tools (scanners that implement the libCRS API) can be plugged directly
-into the `osscrs-scan` task using Pattern A or Pattern B — see above.
-
-For a step-by-step guide to writing and testing your own OSS-CRS tool, see
-[`docs/osscrs-tool-guide.md`](docs/osscrs-tool-guide.md).
+For a comprehensive blueprint on writing, testing, and plugging an external tool into the pipeline, see [`docs/osscrs-tool-guide.md`](docs/osscrs-tool-guide.md).
 
 ## Configuration
 
