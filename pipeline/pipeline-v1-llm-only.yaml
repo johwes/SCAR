@@ -1,0 +1,86 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: scar-v1
+spec:
+  description: >
+    SCAR v1 — LLM-only pipeline.
+    Compiles C source to bitcode (for validator flags), then runs the LLM
+    vulnerability scan only. No IKOS static analysis. Demonstrates the
+    baseline capability before sound static analysis is added.
+  params:
+    - name: repo-url
+      description: Git URL of the C repository to scan
+    - name: revision
+      default: main
+    - name: source-dir
+      default: "."
+    - name: triage-rounds
+      default: "5"
+    - name: min-confidence
+      default: "0.6"
+  workspaces:
+    - name: shared-data
+      description: PVC shared across all tasks
+  tasks:
+    - name: clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      workspaces:
+        - name: output
+          workspace: shared-data
+      params:
+        - name: URL
+          value: $(params.repo-url)
+        - name: REVISION
+          value: $(params.revision)
+
+    - name: build-bitcode
+      taskRef:
+        name: scar-build-bitcode
+      runAfter: [clone]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    - name: llm-scan
+      taskRef:
+        name: scar-llm-scan
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    - name: repair-loop
+      taskRef:
+        name: scar-repair-loop
+      runAfter: [llm-scan]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: triage-rounds
+          value: $(params.triage-rounds)
+        - name: min-confidence
+          value: $(params.min-confidence)
+
+    - name: submit-results
+      taskRef:
+        name: scar-submit-results
+      runAfter: [repair-loop]
+      workspaces:
+        - name: source
+          workspace: shared-data

@@ -1,0 +1,54 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-stub-custom-scan
+spec:
+  description: >
+    Stub task — replace this with a custom static analyser, pattern scanner,
+    or any tool that produces vulnerability findings.
+    Writes an empty findings file so the repair loop starts cleanly.
+    See docs/extending-the-pipeline.md for the findings schema and wiring instructions.
+  params:
+    - name: source-dir
+      description: Path within the workspace containing C source files
+      default: "."
+  workspaces:
+    - name: source
+      description: Shared workspace containing the cloned C repository
+  steps:
+    - name: run
+      image: quay.io/jwesterl/scar-agent:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+        SRC="$WS/$(params.source-dir)"
+        FINDINGS="$WS/.scar/findings-custom-scan.json"
+
+        mkdir -p "$WS/.scar"
+
+        # ── Replace everything below with your analyser logic ─────────────────
+        #
+        # Available inputs:
+        #   Source files:            $SRC/**/*.c
+        #   LLVM bitcode:            $WS/.scar/bitcode/
+        #   Compile commands (CCDB): $WS/.scar/compile_commands.json
+        #
+        # Write your findings to $FINDINGS using this schema:
+        #
+        # [
+        #   {
+        #     "rule_id":   "CWE-476",
+        #     "severity":  "high",
+        #     "file_path": "/workspace/source/src/handler.c",
+        #     "line":      42,
+        #     "column":    0,
+        #     "message":   "Precise description of what is wrong — shown to the LLM"
+        #   }
+        # ]
+        #
+        # The repair loop discovers this file automatically — no other changes needed.
+        # ─────────────────────────────────────────────────────────────────────
+
+        echo "stub: no custom scanner configured — writing empty findings"
+        echo '[]' > "$FINDINGS"

@@ -1,0 +1,140 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: scar-v3
+spec:
+  description: >
+    SCAR v3 — Extended pipeline with stub tasks for students to implement.
+    Identical to v2 plus two additional parallel analysis slots (fuzzer stub
+    and custom scanner stub) that run alongside IKOS and the LLM scan.
+    Replace the stub tasks with real tools — the repair loop picks up their
+    findings automatically via the .scar/findings-<name>.json convention.
+    See docs/extending-the-pipeline.md.
+  params:
+    - name: repo-url
+      description: Git URL of the C repository to scan
+    - name: revision
+      default: main
+    - name: source-dir
+      default: "."
+    - name: triage-rounds
+      default: "5"
+    - name: min-confidence
+      default: "0.6"
+    - name: tool-image
+      default: "quay.io/jwesterl/scar-agent:latest"
+    - name: tool-cmd
+      default: ""
+  workspaces:
+    - name: shared-data
+      description: PVC shared across all tasks
+  tasks:
+    - name: clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      workspaces:
+        - name: output
+          workspace: shared-data
+      params:
+        - name: URL
+          value: $(params.repo-url)
+        - name: REVISION
+          value: $(params.revision)
+
+    - name: build-bitcode
+      taskRef:
+        name: scar-build-bitcode
+      runAfter: [clone]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    - name: ikos-analyze
+      taskRef:
+        name: scar-ikos-analyze
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+
+    - name: llm-scan
+      taskRef:
+        name: scar-llm-scan
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    - name: osscrs-scan
+      taskRef:
+        name: scar-osscrs-scan
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    # ── Student extension slots ───────────────────────────────────────────────
+    # These stub tasks write empty findings files. Replace the task definitions
+    # in pipeline/tasks/scar-stub-fuzzer.yaml and scar-stub-custom-scan.yaml
+    # with real tools. The repair loop picks up all findings-*.json files
+    # automatically — no changes to the pipeline YAML are needed.
+
+    - name: fuzzer-stub
+      taskRef:
+        name: scar-stub-fuzzer
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    - name: custom-scan-stub
+      taskRef:
+        name: scar-stub-custom-scan
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: source-dir
+          value: $(params.source-dir)
+
+    # ── Repair loop waits for ALL parallel tasks ──────────────────────────────
+    - name: repair-loop
+      taskRef:
+        name: scar-repair-loop
+      runAfter: [ikos-analyze, llm-scan, osscrs-scan, fuzzer-stub, custom-scan-stub]
+      workspaces:
+        - name: source
+          workspace: shared-data
+      params:
+        - name: triage-rounds
+          value: $(params.triage-rounds)
+        - name: min-confidence
+          value: $(params.min-confidence)
+
+    - name: submit-results
+      taskRef:
+        name: scar-submit-results
+      runAfter: [repair-loop]
+      workspaces:
+        - name: source
+          workspace: shared-data

@@ -1,0 +1,52 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-stub-fuzzer
+spec:
+  description: >
+    Stub task — replace this with a real fuzzer (AFL++, libFuzzer, Honggfuzz).
+    Writes an empty findings file so the repair loop starts cleanly.
+    See docs/extending-the-pipeline.md for the findings schema and wiring instructions.
+  params:
+    - name: source-dir
+      description: Path within the workspace containing C source files
+      default: "."
+  workspaces:
+    - name: source
+      description: Shared workspace containing the cloned C repository
+  steps:
+    - name: run
+      image: quay.io/jwesterl/scar-agent:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+        SRC="$WS/$(params.source-dir)"
+        FINDINGS="$WS/.scar/findings-fuzzer.json"
+
+        mkdir -p "$WS/.scar"
+
+        # ── Replace everything below with your fuzzer logic ───────────────────
+        #
+        # Your fuzzer should:
+        #   1. Build a fuzz target from $SRC (or use the OSS-Fuzz build already
+        #      in $WS/.scar/oss-out/ if build-bitcode ran build.sh)
+        #   2. Run the fuzzer for a fixed time budget
+        #   3. For each crash found, write one entry to $FINDINGS:
+        #
+        # [
+        #   {
+        #     "rule_id":   "CWE-121",
+        #     "severity":  "high",
+        #     "file_path": "/workspace/source/src/parse.c",
+        #     "line":      46,
+        #     "column":    0,
+        #     "message":   "Buffer overflow triggered by fuzzer input: <input>"
+        #   }
+        # ]
+        #
+        # The repair loop discovers this file automatically — no other changes needed.
+        # ─────────────────────────────────────────────────────────────────────
+
+        echo "stub: no fuzzer configured — writing empty findings"
+        echo '[]' > "$FINDINGS"
