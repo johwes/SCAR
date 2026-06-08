@@ -31,6 +31,8 @@ The context generation phase is currently blind to cross-module execution origin
 ### Function-boundary chunking for large files
 Passing complete files to the LLM can easily overflow active token context windows or introduce noise on massive source frameworks. Utilizing the Clang AST compiler hooks to slice source modules explicitly at function boundaries keeps related functional clusters intact while dropping completely irrelevant background blocks.
 
+*Partially implemented:* `context_gen.py` now uses a brace-counting heuristic to extract the enclosing C function (capped at 300 lines) instead of sending the whole file. The remaining step is replacing the heuristic with a proper Clang AST pass for correctness on macro-heavy code.
+
 ### RAG over accepted patches
 Store each accepted patch in a vector database indexed by its corresponding CWE rule ID and structural code snippet layout. When processing a newly discovered vulnerability, retrieving the top 2–3 most closely aligned historical patches and injecting them as multi-shot programming solutions inside `patch_gen` allows the agent to adapt natively to a specific engineering team's variable styles and design conventions.
 

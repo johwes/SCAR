@@ -579,6 +579,12 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Token efficiency
+
+See [`docs/token-efficiency.md`](docs/token-efficiency.md) for an explanation of
+where tokens go, the optimisations already in place (function-boundary truncation,
+early-exit triage, per-task accounting, LLM retry), and what remains on the roadmap.
+
 ## Improvements roadmap
 
 See [`IMPROVEMENTS.md`](IMPROVEMENTS.md) for a prioritised list of enhancements from

@@ -106,6 +106,11 @@ def run(
         verdict = match.group(1) if match else "UNCERTAIN"
         verdicts.append(verdict)
         print(f"    [triage round {i+1}/{rounds}] {verdict}", flush=True)
+        # A clear INVALID rarely recovers in later rounds — skip remaining
+        # rounds to save tokens; the arbiter still reads all completed reasoning.
+        if verdict == "INVALID" and i < rounds - 1:
+            print(f"    [triage] early exit after round {i+1} — INVALID", flush=True)
+            break
 
     # Arbiter round
     print(f"    [arbiter] issuing final verdict...", flush=True)
