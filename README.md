@@ -4,19 +4,41 @@ Autonomous CVE scanning and patch generation for C codebases, orchestrated via O
 
 ## Architecture
 
-```
-C source (x86)
-  └─> build system detection → compile_commands.json  [Task: build-bitcode]
-  └─> clang -emit-llvm → .bc                          [Task: build-bitcode]
-        ├─> IKOS → SARIF + output.db          [Task: ikos-analyze]   ─┐
-        ├─> LLM vulnerability scan            [Task: llm-scan]       ─┤ (parallel)
-        └─> OSS-CRS external tool            [Task: osscrs-scan]    ─┘
-                                                                      ↓
-              Stage 1: Context Gen + IKOS witness trace  ─┐  [Task: repair-loop]
-              Stage 2: Patch Gen                          ─┤
-              Stage 3: Validate + Triage                  ┘
-                    └─> accepted patches              [Task: submit-results]
-                    └─> POST results to dashboard     [Task: report]
+```mermaid
+flowchart TD
+    src(["C source (x86)"])
+
+    bb["build-bitcode
+    build system detection → compile_commands.json
+    clang -emit-llvm → .bc"]
+
+    subgraph par["parallel analysis"]
+        ikos["ikos-analyze
+        IKOS → SARIF + output.db"]
+        llm["llm-scan
+        LLM vulnerability scan"]
+        osscrs["osscrs-scan
+        OSS-CRS external tool"]
+    end
+
+    subgraph rl["repair-loop"]
+        direction TB
+        s1["① Context Gen + IKOS witness trace"]
+        s2["② Patch Gen"]
+        s3["③ Validate + Triage"]
+        s1 --> s2 --> s3
+    end
+
+    submit["submit-results
+    accepted patches"]
+    report["report
+    POST results to dashboard"]
+
+    src --> bb
+    bb --> ikos & llm & osscrs
+    ikos & llm & osscrs --> s1
+    s3 --> submit
+    submit --> report
 ```
 
 `ikos-analyze`, `llm-scan`, and `osscrs-scan` run in parallel after bitcode
