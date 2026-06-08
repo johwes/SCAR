@@ -579,6 +579,13 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Engineering history
+
+[`docs/engineering-history.md`](docs/engineering-history.md) traces how SCAR
+evolved from a failing container build to a multi-scanner pipeline — stage by
+stage, with the reasoning behind each decision. Written for students who want
+to understand how a system like this is actually built.
+
 ## Token efficiency
 
 See [`docs/token-efficiency.md`](docs/token-efficiency.md) for an explanation of
