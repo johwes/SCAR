@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="SCAR Dashboard")
-DB_PATH = os.environ.get("DB_PATH", "/data/dashboard.db")
+DB_PATH = os.environ.get("DB_PATH", "/tmp/dashboard.db")
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
