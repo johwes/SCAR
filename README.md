@@ -325,6 +325,3 @@ context injection, RAG over accepted patches, parallel repair loop) to higher co
 (program slicing, cross-file data flow, reachability filtering, ESBMC integration,
 fuzzer-driven triage, and ARM cross-compilation).
 
-## Benchmarks
-
-See [`benchmarks/juliet/`](benchmarks/juliet/README.md) for setup instructions for the NIST Juliet Test Suite (CWE-121, CWE-122, CWE-476).
