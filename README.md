@@ -216,11 +216,21 @@ needed when a new analyzer or fuzzer is added to the pipeline. To add a new tool
 
 ## Test corpus
 
-### johwes/scar-test-c
+SCAR ships with two kinds of test targets — **pipeline smoke tests** (labelled,
+for verifying SCAR works) and a **competition target** (unlabelled real code, for
+meaningful scoring).
 
-[`johwes/scar-test-c`](https://github.com/johwes/scar-test-c) — two test targets:
+### Pipeline smoke tests
 
-**Single-file (root of repo)**
+#### johwes/scar-test-c
+
+[`johwes/scar-test-c`](https://github.com/johwes/scar-test-c) — minimal single-file
+C programs, one labelled vulnerability each. Each file carries a header comment naming
+the CWE and inline comments marking the exact vulnerable line. **Do not use as a
+competition target** — the LLM reads the labels rather than analysing the code, so
+detection scores are meaningless.
+
+Use this corpus to verify the pipeline is working end-to-end, not to benchmark scanners.
 
 Minimal C files, one vulnerability each, covering all active checkers:
 
@@ -247,6 +257,32 @@ compilation.
 | `src/input.c` | CWE-121 (`strcpy`) | not detected | detected |
 | `src/process.c` | CWE-476 | `nullity` | detected |
 | `src/output.c` | CWE-369 | `dbz` | detected |
+
+#### johwes/scar-test-multifile
+
+[`johwes/scar-test-multifile`](https://github.com/johwes/scar-test-multifile) — three
+source files sharing a common header (`include/common.h`), built via an OSS-Fuzz
+`build.sh`. Also labelled. Use to test build system detection and `compile_commands.json`
+handling, not for competition scoring.
+
+### Competition target
+
+#### johwes/scarnet
+
+[`johwes/scarnet`](https://github.com/johwes/scarnet) — a real TCP key-value server
+written in C. All bug-documenting comments have been stripped and the git history has
+been squashed to a single commit, removing both inline hints and diff-based cheating
+vectors. This is the intended target for workshop competition runs.
+
+Students should run their pipeline against scarnet and submit scores to the dashboard.
+Detection rate here reflects genuine scanner quality, not label-reading.
+
+```bash
+tkn pipeline start scar-v2 \
+  --param repo-url=https://github.com/johwes/scarnet \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --showlog
+```
 
 ### Pluggable Ecosystem Testing
 
