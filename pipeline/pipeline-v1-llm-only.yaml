@@ -93,5 +93,7 @@ spec:
         - name: source
           workspace: shared-data
       params:
+        - name: team-id
+          value: $(context.pipelineRun.namespace)
         - name: repo-url
           value: $(params.repo-url)

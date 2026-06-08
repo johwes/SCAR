@@ -9,6 +9,9 @@ spec:
     computes score and metrics, and POSTs to the dashboard API.
     Gracefully skipped if the scar-dashboard ConfigMap is not present.
   params:
+    - name: team-id
+      description: Team identifier — pass $(context.pipelineRun.namespace) from the pipeline
+      default: "unknown"
     - name: repo-url
       description: Git URL of the repository that was scanned
       default: ""
@@ -28,7 +31,7 @@ spec:
               key: url
               optional: true
         - name: TEAM_ID
-          value: $(context.pipelineRun.namespace)
+          value: $(params.team-id)
       script: |
         #!/usr/bin/env python3
         import json, os, sys, time, urllib.request
