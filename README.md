@@ -159,6 +159,37 @@ normalises the payload to SCAR's findings schema, and writes
 The source is sandboxed to `/tmp/osscrs-sandbox` before the tool runs, so destructive
 verification steps cannot corrupt the shared PVC.
 
+#### Worked example: grep_scan (built-in, no rebuild needed)
+
+`examples/grep_scan.py` ships inside the `scar-agent` image at
+`/app/examples/grep_scan.py`. It scans for dangerous C function calls
+(`gets`, `strcpy`, `strcat`, `sprintf`, `scanf`) using regex patterns and
+writes findings in the SCAR schema — no external dependencies, no container
+rebuild required.
+
+```bash
+tkn pipeline start scar-v2 \
+  --param repo-url=https://github.com/johwes/scar-test-c \
+  --param tool-cmd="python3 /app/examples/grep_scan.py" \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --use-param-defaults --showlog
+```
+
+Expected output from the `osscrs-scan` task:
+
+```
+[grep-scan] 3 finding(s) -> /workspace/source/.scar/findings-grep-scan-<ts>.json
+```
+
+The repair loop picks up the grep findings alongside IKOS and the LLM scan.
+Each accepted patch will be tagged with its origin (`ikos`, `llm-scan`, or
+`osscrs-scan`) — grep findings that survive triage contribute to the
+tool diversity score bonus.
+
+To add your own patterns, edit `PATTERNS` in `examples/grep_scan.py` and
+rebuild the `scar-agent` image, or mount a custom script into the pod and
+point `tool-cmd` at it.
+
 ## Build system support
 
 `build-bitcode` runs as two steps:
@@ -446,19 +477,26 @@ tkn pipeline start scar-v1 \
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --workspace name=shared-data,claimName=scar-pvc \
-  --showlog
+  --use-param-defaults --showlog
 
 # v2 — multi-file OSS-Fuzz example (separate repo)
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-multifile \
   --workspace name=shared-data,claimName=scar-pvc \
-  --showlog
+  --use-param-defaults --showlog
 
 # v2 — scarnet test corpus
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scarnet \
   --workspace name=shared-data,claimName=scar-pvc \
-  --showlog
+  --use-param-defaults --showlog
+
+# v2 — with the built-in grep_scan example tool (Pattern A, no image rebuild)
+tkn pipeline start scar-v2 \
+  --param repo-url=https://github.com/johwes/scar-test-c \
+  --param tool-cmd="python3 /app/examples/grep_scan.py" \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --use-param-defaults --showlog
 
 # v2 — with an external OSS-CRS tool (Pattern B — unmodified upstream image)
 tkn pipeline start scar-v2 \
@@ -466,13 +504,13 @@ tkn pipeline start scar-v2 \
   --param tool-image=ghcr.io/example/osscrs-tool:latest \
   --param tool-cmd="/usr/local/bin/scanner --src \$SANDBOX_SRC" \
   --workspace name=shared-data,claimName=scar-pvc \
-  --showlog
+  --use-param-defaults --showlog
 
 # v3 — student extension stubs included
 tkn pipeline start scar-v3 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --workspace name=shared-data,claimName=scar-pvc \
-  --showlog
+  --use-param-defaults --showlog
 ```
 
 The `report` task at the end of every variant automatically POSTs results to the

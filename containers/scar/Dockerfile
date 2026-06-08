@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY pyproject.toml .
 COPY scar/ scar/
+COPY examples/ examples/
 
 RUN pip3 install --no-cache-dir -e .
 
