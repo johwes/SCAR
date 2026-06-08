@@ -234,10 +234,11 @@ Minimal C files, one vulnerability each, covering all active checkers:
 | `signedoverflow.c` | CWE-190 | `sio` | detected |
 | `doublefree.c` | CWE-415 | `dfa` | detected |
 
-**Multi-file (`multifile/`)**
+### johwes/scar-test-multifile
 
-Three source files sharing a common header (`include/common.h`), built via an
-OSS-Fuzz `build.sh`. Tests the full build system detection and `compile_commands.json`
+[`johwes/scar-test-multifile`](https://github.com/johwes/scar-test-multifile) — three
+source files sharing a common header (`include/common.h`), built via an OSS-Fuzz
+`build.sh`. Tests the full build system detection and `compile_commands.json`
 pipeline — without the `-Iinclude` flag captured by bear, all three patches would fail
 compilation.
 
@@ -411,10 +412,9 @@ tkn pipeline start scar-v2 \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 
-# v2 — multi-file OSS-Fuzz example
+# v2 — multi-file OSS-Fuzz example (separate repo)
 tkn pipeline start scar-v2 \
-  --param repo-url=https://github.com/johwes/scar-test-c \
-  --param source-dir=multifile \
+  --param repo-url=https://github.com/johwes/scar-test-multifile \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 
