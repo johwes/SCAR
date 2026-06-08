@@ -166,6 +166,10 @@ def main() -> None:
             flush=True,
         )
 
+    # Write token usage for the report task to pick up.
+    token_file = Path(args.repo) / ".scar" / "token-usage.json"
+    token_file.write_text(json.dumps(usage))
+
     sys.exit(0 if accepted else 1)
 
 

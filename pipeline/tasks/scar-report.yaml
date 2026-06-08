@@ -1,0 +1,112 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-report
+spec:
+  description: >
+    Submit pipeline run results to the central SCAR competition dashboard.
+    Reads scar-results.json and token-usage.json from the shared workspace,
+    computes score and metrics, and POSTs to the dashboard API.
+    Gracefully skipped if the scar-dashboard ConfigMap is not present.
+  workspaces:
+    - name: source
+      description: Shared workspace containing .scar/ analysis artifacts
+  steps:
+    - name: report
+      image: quay.io/jwesterl/scar-agent:latest
+      env:
+        - name: DASHBOARD_URL
+          valueFrom:
+            configMapKeyRef:
+              name: scar-dashboard
+              key: url
+              optional: true
+        - name: TEAM_ID
+          value: $(context.pipelineRun.namespace)
+      script: |
+        #!/usr/bin/env python3
+        import json, os, sys, time, urllib.request
+        from pathlib import Path
+
+        ws           = "$(workspaces.source.path)"
+        results_path = Path(ws) / ".scar" / "scar-results.json"
+        tokens_path  = Path(ws) / ".scar" / "token-usage.json"
+        start_path   = Path(ws) / ".scar" / "run-start.txt"
+        dashboard    = os.environ.get("DASHBOARD_URL", "").strip()
+        team         = os.environ.get("TEAM_ID", "unknown")
+
+        # ── Load results ──────────────────────────────────────────────────────
+        accepted = []
+        if results_path.exists():
+            try:
+                accepted = json.loads(results_path.read_text())
+            except Exception as e:
+                print(f"[report] warning: could not read scar-results.json: {e}", flush=True)
+
+        # ── Load token usage ──────────────────────────────────────────────────
+        tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        if tokens_path.exists():
+            try:
+                tokens = json.loads(tokens_path.read_text())
+            except Exception as e:
+                print(f"[report] warning: could not read token-usage.json: {e}", flush=True)
+
+        # ── Compute execution time ────────────────────────────────────────────
+        elapsed = 0.0
+        if start_path.exists():
+            try:
+                start = float(start_path.read_text().strip())
+                elapsed = time.time() - start
+            except Exception:
+                pass
+
+        # ── Compute metrics ───────────────────────────────────────────────────
+        unique_cwes    = len({p["finding"]["rule_id"] for p in accepted})
+        tool_diversity = len({p["origin"] for p in accepted})
+        findings_slim  = [
+            {
+                "rule_id":    p["finding"]["rule_id"],
+                "origin":     p["origin"],
+                "confidence": p["triage"]["confidence"],
+            }
+            for p in accepted
+        ]
+
+        score = len(accepted) * 3 + unique_cwes * 2 + tool_diversity * 1
+
+        print(
+            f"[report] team={team}  patches={len(accepted)}  cwes={unique_cwes}"
+            f"  tools={tool_diversity}  score={score}"
+            f"  tokens={tokens['total_tokens']:,}  time={elapsed:.0f}s",
+            flush=True,
+        )
+
+        # ── Submit to dashboard ───────────────────────────────────────────────
+        if not dashboard:
+            print("[report] DASHBOARD_URL not configured — skipping submission", flush=True)
+            sys.exit(0)
+
+        payload = json.dumps({
+            "team_id":           team,
+            "accepted_patches":  len(accepted),
+            "unique_cwes":       unique_cwes,
+            "tool_diversity":    tool_diversity,
+            "prompt_tokens":     tokens["prompt_tokens"],
+            "completion_tokens": tokens["completion_tokens"],
+            "total_tokens":      tokens["total_tokens"],
+            "execution_seconds": elapsed,
+            "findings":          findings_slim,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{dashboard}/submit",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = json.loads(resp.read())
+                print(f"[report] submitted — score={body['score']}", flush=True)
+        except Exception as e:
+            print(f"[report] dashboard unreachable: {e} — continuing", flush=True)

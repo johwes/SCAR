@@ -46,6 +46,9 @@ spec:
         set -euo pipefail
         WS=$(workspaces.source.path)
 
+        # Record wall-clock start time for execution timing in the report task.
+        date +%s > "$WS/.scar/run-start.txt"
+
         python3 -u -m scar \
           "$WS/.scar/results.sarif" \
           "$WS" \

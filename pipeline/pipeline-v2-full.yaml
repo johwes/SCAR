@@ -108,3 +108,11 @@ spec:
       workspaces:
         - name: source
           workspace: shared-data
+
+    - name: report
+      taskRef:
+        name: scar-report
+      runAfter: [submit-results]
+      workspaces:
+        - name: source
+          workspace: shared-data
