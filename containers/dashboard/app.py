@@ -220,6 +220,14 @@ def build_dashboard() -> str:
             ORDER BY best_score DESC, total_tokens ASC, best_time_seconds ASC
         """).fetchall()
 
+        all_runs = db.execute("""
+            SELECT team_id, submitted_at, score, accepted_patches, unique_cwes,
+                   tool_diversity, total_tokens, execution_seconds
+            FROM runs
+            ORDER BY submitted_at DESC
+            LIMIT 50
+        """).fetchall()
+
         stats = db.execute("""
             SELECT
                 COUNT(*)                    AS total_runs,
@@ -249,7 +257,7 @@ def build_dashboard() -> str:
         rows_html += f"""
         <tr class="{row_class}">
           <td class="center">{rank_label}{tie_note}</td>
-          <td><strong>{r['team_id']}</strong></td>
+          <td><strong><a class="team-link" href="/runs/{r['team_id']}">{r['team_id']}</a></strong></td>
           <td class="repo muted">{_short_repo(r['best_repo_url'])}</td>
           <td class="center score">{r['best_score']}</td>
           <td class="center">{r['best_patches']}</td>
@@ -265,6 +273,22 @@ def build_dashboard() -> str:
 
     if not rows_html:
         rows_html = '<tr><td colspan="13" class="center muted">No submissions yet</td></tr>'
+
+    history_html = ""
+    for r in all_runs:
+        history_html += f"""
+        <tr>
+          <td class="muted">{_fmt_ts(r['submitted_at'])}</td>
+          <td><a class="team-link" href="/runs/{r['team_id']}">{r['team_id']}</a></td>
+          <td class="center score">{r['score']}</td>
+          <td class="center">{r['accepted_patches']}</td>
+          <td class="center">{r['unique_cwes']}</td>
+          <td class="center">{r['tool_diversity']}</td>
+          <td class="center">{_fmt_tokens(r['total_tokens'])}</td>
+          <td class="center">{_fmt_time(r['execution_seconds'])}</td>
+        </tr>"""
+    if not history_html:
+        history_html = '<tr><td colspan="8" class="center muted">No runs yet</td></tr>'
 
     s = dict(stats) if stats else {}
     cluster_prompt     = _fmt_tokens(s.get("cluster_prompt_tokens") or 0)
@@ -311,6 +335,10 @@ def build_dashboard() -> str:
     .rank-second td.score {{ color: #94a3b8; }}
     .rank-third td.score  {{ color: #b47c3c; }}
     .tiebreaker-note {{ font-size: 0.75rem; color: #475569; margin-top: 1rem; }}
+    a.team-link {{ color: #e2e8f0; text-decoration: none; }}
+    a.team-link:hover {{ color: #a78bfa; text-decoration: underline; }}
+    .history-section {{ margin-top: 2.5rem; }}
+    .history-section h2 {{ margin-bottom: 1rem; }}
     footer {{ padding: 1rem 2rem; font-size: 0.75rem; color: #334155; border-top: 1px solid #1e2235; margin-top: 2rem; }}
   </style>
 </head>
@@ -369,7 +397,31 @@ def build_dashboard() -> str:
     <p class="tiebreaker-note">
       Score = accepted patches x3 + unique CWEs x2 + tool diversity x1.
       Tiebreaker: fewest total tokens across all runs, then fastest best execution time.
+      Click a team name to see their full run history.
     </p>
+
+    <div class="history-section">
+      <h2>Recent Runs (last 50)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Submitted</th>
+              <th>Team</th>
+              <th>Score</th>
+              <th>Patches</th>
+              <th>CWEs</th>
+              <th>Tools</th>
+              <th>Tokens</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history_html}
+          </tbody>
+        </table>
+      </div>
+    </div>
   </main>
 
   <footer>SCAR &mdash; Static C Analysis &amp; Repair &nbsp;|&nbsp; Workshop</footer>
