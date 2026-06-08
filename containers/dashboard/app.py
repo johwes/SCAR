@@ -248,7 +248,7 @@ def build_dashboard() -> str:
     if not rows_html:
         rows_html = '<tr><td colspan="12" class="center muted">No submissions yet</td></tr>'
 
-    s = stats or {}
+    s = dict(stats) if stats else {}
     cluster_prompt     = _fmt_tokens(s.get("cluster_prompt_tokens") or 0)
     cluster_completion = _fmt_tokens(s.get("cluster_completion_tokens") or 0)
     cluster_total      = _fmt_tokens(s.get("cluster_total_tokens") or 0)
