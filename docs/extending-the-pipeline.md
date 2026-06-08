@@ -282,6 +282,54 @@ make two edits to the pipeline YAML:
 
 ---
 
+## Local development workflow
+
+Iterating via commit → push → `tkn pipeline start` → wait is slow. Two utilities
+let you validate your tool locally before touching the cluster.
+
+### 1. Mock the Tekton workspace
+
+`tests/mock_pipeline.sh` recreates the PVC directory layout on your laptop and runs
+your scanner against a local copy of the source:
+
+```bash
+# Basic: check that your tool writes a valid findings file
+tests/mock_pipeline.sh /path/to/scarnet
+
+# End-to-end: also run the SCAR repair loop against your findings
+LLM_BASE_URL=... LLM_API_KEY=... LLM_PATCH_MODEL=... LLM_REVIEW_MODEL=... \
+  tests/mock_pipeline.sh /path/to/scarnet --run-repair
+```
+
+Edit the `Executing student tool` section near the middle of the script to call
+your scanner. The script verifies that a `findings-*.json` file was produced,
+validates its schema, and (with `--run-repair`) drives the full repair loop so you
+can see accepted patches before pushing anything to the cluster.
+
+### 2. Validate the findings schema
+
+```bash
+python3 scar/validate_schema.py .scar/findings-myscanner.json
+```
+
+This catches the most common integration mistakes before the repair loop silently
+drops your findings:
+
+| Problem | Example |
+|---|---|
+| Missing required field | `"filepath"` instead of `"file_path"` |
+| Wrong type for `line` | `"46"` (string) instead of `46` (integer) |
+| Invalid `severity` | `"warning"` — must be `critical`, `high`, `medium`, `low`, or `info` |
+
+Pass multiple files at once and the exit code is 1 if any file fails, so it is safe
+to use in a pre-commit hook or local CI step:
+
+```bash
+python3 scar/validate_schema.py .scar/findings-*.json
+```
+
+---
+
 ## Applying your changes to the cluster
 
 ```bash
