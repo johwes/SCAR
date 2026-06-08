@@ -34,6 +34,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS runs (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 team_id             TEXT    NOT NULL,
+                repo_url            TEXT,
                 submitted_at        REAL    NOT NULL,
                 accepted_patches    INTEGER NOT NULL,
                 unique_cwes         INTEGER NOT NULL,
@@ -46,6 +47,11 @@ def init_db() -> None:
                 findings_json       TEXT
             )
         """)
+        # Migrate existing databases that predate the repo_url column
+        try:
+            db.execute("ALTER TABLE runs ADD COLUMN repo_url TEXT")
+        except sqlite3.OperationalError:
+            pass
         db.commit()
 
 
@@ -69,6 +75,7 @@ def startup() -> None:
 
 class RunSubmission(BaseModel):
     team_id:            str
+    repo_url:           str = ""
     accepted_patches:   int
     unique_cwes:        int
     tool_diversity:     int
@@ -89,12 +96,12 @@ def submit(run: RunSubmission) -> dict:
     with get_db() as db:
         db.execute(
             """INSERT INTO runs
-               (team_id, submitted_at, accepted_patches, unique_cwes,
+               (team_id, repo_url, submitted_at, accepted_patches, unique_cwes,
                 tool_diversity, score, prompt_tokens, completion_tokens,
                 total_tokens, execution_seconds, findings_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                run.team_id, time.time(),
+                run.team_id, run.repo_url, time.time(),
                 run.accepted_patches, run.unique_cwes, run.tool_diversity, score,
                 run.prompt_tokens, run.completion_tokens, run.total_tokens,
                 run.execution_seconds, json.dumps(run.findings),
@@ -130,7 +137,7 @@ def leaderboard() -> list[dict]:
 def team_runs(team_id: str) -> list[dict]:
     with get_db() as db:
         rows = db.execute(
-            """SELECT id, submitted_at, accepted_patches, unique_cwes,
+            """SELECT id, submitted_at, repo_url, accepted_patches, unique_cwes,
                       tool_diversity, score, prompt_tokens, completion_tokens,
                       total_tokens, execution_seconds
                FROM runs WHERE team_id = ?
@@ -159,6 +166,13 @@ def cluster_stats() -> dict:
 
 
 # ── HTML Dashboard ────────────────────────────────────────────────────────────
+
+def _short_repo(url: str | None) -> str:
+    if not url:
+        return "—"
+    parts = [p for p in url.rstrip("/").split("/") if p]
+    return "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+
 
 def _fmt_tokens(n: int | None) -> str:
     if n is None:
@@ -197,8 +211,11 @@ def build_dashboard() -> str:
                 SUM(completion_tokens)      AS total_completion_tokens,
                 SUM(total_tokens)           AS total_tokens,
                 MIN(execution_seconds)      AS best_time_seconds,
-                MAX(submitted_at)           AS last_run_at
-            FROM runs
+                MAX(submitted_at)           AS last_run_at,
+                (SELECT repo_url FROM runs r2
+                 WHERE r2.team_id = r.team_id
+                 ORDER BY score DESC, submitted_at DESC LIMIT 1) AS best_repo_url
+            FROM runs r
             GROUP BY team_id
             ORDER BY best_score DESC, total_tokens ASC, best_time_seconds ASC
         """).fetchall()
@@ -233,6 +250,7 @@ def build_dashboard() -> str:
         <tr class="{row_class}">
           <td class="center">{rank_label}{tie_note}</td>
           <td><strong>{r['team_id']}</strong></td>
+          <td class="repo muted">{_short_repo(r['best_repo_url'])}</td>
           <td class="center score">{r['best_score']}</td>
           <td class="center">{r['best_patches']}</td>
           <td class="center">{r['best_cwes']}</td>
@@ -246,7 +264,7 @@ def build_dashboard() -> str:
         </tr>"""
 
     if not rows_html:
-        rows_html = '<tr><td colspan="12" class="center muted">No submissions yet</td></tr>'
+        rows_html = '<tr><td colspan="13" class="center muted">No submissions yet</td></tr>'
 
     s = dict(stats) if stats else {}
     cluster_prompt     = _fmt_tokens(s.get("cluster_prompt_tokens") or 0)
@@ -330,6 +348,7 @@ def build_dashboard() -> str:
           <tr>
             <th>Rank</th>
             <th>Team (namespace)</th>
+            <th>Repo</th>
             <th>Score</th>
             <th>Patches</th>
             <th>CWEs</th>

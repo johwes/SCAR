@@ -146,3 +146,6 @@ spec:
       workspaces:
         - name: source
           workspace: shared-data
+      params:
+        - name: repo-url
+          value: $(params.repo-url)

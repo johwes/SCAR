@@ -8,6 +8,10 @@ spec:
     Reads scar-results.json and token-usage.json from the shared workspace,
     computes score and metrics, and POSTs to the dashboard API.
     Gracefully skipped if the scar-dashboard ConfigMap is not present.
+  params:
+    - name: repo-url
+      description: Git URL of the repository that was scanned
+      default: ""
   workspaces:
     - name: source
       description: Shared workspace containing .scar/ analysis artifacts
@@ -15,6 +19,8 @@ spec:
     - name: report
       image: quay.io/jwesterl/scar-agent:latest
       env:
+        - name: REPO_URL
+          value: $(params.repo-url)
         - name: DASHBOARD_URL
           valueFrom:
             configMapKeyRef:
@@ -34,6 +40,7 @@ spec:
         start_path   = Path(ws) / ".scar" / "run-start.txt"
         dashboard    = os.environ.get("DASHBOARD_URL", "").strip()
         team         = os.environ.get("TEAM_ID", "unknown")
+        repo_url     = os.environ.get("REPO_URL", "").strip()
 
         # ── Load results ──────────────────────────────────────────────────────
         accepted = []
@@ -88,6 +95,7 @@ spec:
 
         payload = json.dumps({
             "team_id":           team,
+            "repo_url":          repo_url,
             "accepted_patches":  len(accepted),
             "unique_cwes":       unique_cwes,
             "tool_diversity":    tool_diversity,
