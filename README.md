@@ -265,15 +265,21 @@ Use this corpus to verify the pipeline is working end-to-end, not to benchmark s
 
 Minimal C files, one vulnerability each, covering all active checkers:
 
-| File | CWE | IKOS | LLM scan |
+| File | CWE | IKOS (deterministic) | LLM scan (variable) |
 |---|---|---|---|
-| `bof.c` | CWE-121 (`strcpy`) | not detected | detected |
-| `oob_read.c` | CWE-125 | `boa` | detected |
-| `divzero.c` | CWE-369 | `dbz` | detected |
-| `nullderef.c` | CWE-476 | `nullity` | detected |
-| `uninit.c` | CWE-457 | `uva` | detected |
-| `signedoverflow.c` | CWE-190 | `sio` | detected |
-| `doublefree.c` | CWE-415 | `dfa` | detected |
+| `bof.c` | CWE-121 (`strcpy`) | not in scope | in scope |
+| `oob_read.c` | CWE-125 | `boa` | in scope |
+| `divzero.c` | CWE-369 | `dbz` | in scope |
+| `nullderef.c` | CWE-476 | `nullity` | in scope |
+| `uninit.c` | CWE-457 | `uva` | in scope |
+| `signedoverflow.c` | CWE-190 | `sio` | in scope |
+| `doublefree.c` | CWE-415 | `dfa` | in scope |
+
+IKOS results are deterministic — the same checker fires on every run. LLM
+findings vary by model, temperature, and context window; a single run may surface
+2/7 or 7/7 depending on the model and how the prompt resolves. Use IKOS coverage
+as the reliability baseline and treat LLM findings as a complementary, broad-sweep
+signal.
 
 ### johwes/scar-test-multifile
 
@@ -283,18 +289,11 @@ source files sharing a common header (`include/common.h`), built via an OSS-Fuzz
 pipeline — without the `-Iinclude` flag captured by bear, all three patches would fail
 compilation.
 
-| File | CWE | IKOS | LLM scan |
+| File | CWE | IKOS (deterministic) | LLM scan (variable) |
 |---|---|---|---|
-| `src/input.c` | CWE-121 (`strcpy`) | not detected | detected |
-| `src/process.c` | CWE-476 | `nullity` | detected |
-| `src/output.c` | CWE-369 | `dbz` | detected |
-
-#### johwes/scar-test-multifile
-
-[`johwes/scar-test-multifile`](https://github.com/johwes/scar-test-multifile) — three
-source files sharing a common header (`include/common.h`), built via an OSS-Fuzz
-`build.sh`. Also labelled. Use to test build system detection and `compile_commands.json`
-handling, not for competition scoring.
+| `src/input.c` | CWE-121 (`strcpy`) | not in scope | in scope |
+| `src/process.c` | CWE-476 | `nullity` | in scope |
+| `src/output.c` | CWE-369 | `dbz` | in scope |
 
 ### Competition target
 
