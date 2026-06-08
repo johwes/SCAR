@@ -294,6 +294,12 @@ tkn pipeline start scar \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 
+# Run against the scarnet test corpus
+tkn pipeline start scar \
+  --param repo-url=https://github.com/johwes/scarnet \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --showlog
+
 # Run against the multi-file OSS-Fuzz example
 tkn pipeline start scar \
   --param repo-url=https://github.com/johwes/scar-test-c \
