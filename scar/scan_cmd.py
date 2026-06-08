@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import context_gen, vuln_scan
+from . import context_gen, vuln_scan, llm
 
 
 def main() -> None:
@@ -70,6 +70,17 @@ def main() -> None:
 
     out_path.write_text(json.dumps(findings, indent=2))
     print(f"[llm-scan] {len(findings)} finding(s) written → {out_path}", flush=True)
+
+    usage = llm.get_usage()
+    if usage["total_tokens"]:
+        print(
+            f"[llm-scan] tokens: {usage['prompt_tokens']:,} prompt + "
+            f"{usage['completion_tokens']:,} completion = "
+            f"{usage['total_tokens']:,} total",
+            flush=True,
+        )
+    token_file = repo / ".scar" / "token-usage-llm-scan.json"
+    token_file.write_text(json.dumps(usage))
 
 
 if __name__ == "__main__":

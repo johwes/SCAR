@@ -158,15 +158,28 @@ def main() -> None:
     print(f"\n[scar] {len(accepted)} patch(es) accepted → {args.output}", flush=True)
 
     usage = llm.get_usage()
+    # Merge token counts from parallel tasks that ran in separate containers
+    # (e.g. llm-scan writes token-usage-llm-scan.json). The glob intentionally
+    # excludes token-usage.json itself (no hyphen after "usage").
+    for partial in sorted((Path(args.repo) / ".scar").glob("token-usage-*.json")):
+        try:
+            p = json.loads(partial.read_text())
+            usage["prompt_tokens"]     += p.get("prompt_tokens", 0)
+            usage["completion_tokens"] += p.get("completion_tokens", 0)
+            usage["total_tokens"]      += p.get("total_tokens", 0)
+            print(f"[scar] merged tokens from {partial.name}", flush=True)
+        except Exception as exc:
+            print(f"[scar] warning: could not merge {partial.name}: {exc}", flush=True)
+
     if usage["total_tokens"]:
         print(
-            f"[scar] tokens: {usage['prompt_tokens']:,} prompt + "
+            f"[scar] tokens (all tasks): {usage['prompt_tokens']:,} prompt + "
             f"{usage['completion_tokens']:,} completion = "
             f"{usage['total_tokens']:,} total",
             flush=True,
         )
 
-    # Write token usage for the report task to pick up.
+    # Write merged token usage for the report task to pick up.
     token_file = Path(args.repo) / ".scar" / "token-usage.json"
     token_file.write_text(json.dumps(usage))
 
