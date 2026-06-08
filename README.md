@@ -280,18 +280,30 @@ podman push quay.io/jwesterl/scar-dashboard:latest
 # Deploy on the cluster
 oc new-app --image=quay.io/jwesterl/scar-dashboard:latest --name=scar-dashboard
 oc expose svc/scar-dashboard
-
-# Get the public route URL
-DASHBOARD_URL=$(oc get route scar-dashboard -o jsonpath='{.spec.host}')
-echo "Dashboard available at http://$DASHBOARD_URL"
-
-# Create a ConfigMap so pipeline runs can discover the dashboard
-oc create configmap scar-dashboard \
-  --from-literal=url="http://$DASHBOARD_URL"
 ```
 
-Teams that do not have the `scar-dashboard` ConfigMap in their namespace will have the
-`report` task silently skip the POST — no pipeline changes needed.
+Pipeline pods run inside the cluster, so the ConfigMap should point to the
+**internal service DNS name** rather than the public Route. This avoids external
+egress and works even without an exposed Route:
+
+```bash
+# ConfigMap for pipeline runs — uses cluster-internal service URL
+oc create configmap scar-dashboard \
+  --from-literal=url="http://scar-dashboard:8080"
+```
+
+The ConfigMap must be named `scar-dashboard` with key `url`. That exact name and key
+are what the `report` task reads via `configMapKeyRef`.
+
+```bash
+# The Route URL is for browser access to the leaderboard only
+ROUTE=$(oc get route scar-dashboard -o jsonpath='{.spec.host}')
+echo "Leaderboard at http://$ROUTE"
+```
+
+If the `scar-dashboard` ConfigMap is absent from a team's namespace the `report` task
+prints `[report] DASHBOARD_URL not configured — skipping submission` and exits cleanly
+— the pipeline does not abort.
 
 ### Run locally (development)
 
