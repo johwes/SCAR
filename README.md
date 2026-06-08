@@ -46,6 +46,52 @@ compilation. The repair loop merges all finding sources, deduplicates with a
 ±3-line sliding window, and drives each finding through the three-stage LLM
 repair pipeline.
 
+## Repair loop
+
+Each finding goes through three stages:
+
+**① Context generation** — assembles a security briefing for the LLM: the
+source file, grep results for related symbols, and (if present) the IKOS
+counterexample witness trace. IKOS witness traces are the most valuable input
+here — they give the LLM a proven execution path rather than asking it to
+re-derive reachability from source alone.
+
+**② Patch generation** — synthesises a unified diff patch. Applied first with
+`patch --fuzz=3 -l` (tolerant of context-line drift), then with a Python
+fallback that locates the change block by line number if the standard apply
+fails. Only compilation-clean patches proceed to triage.
+
+**③ Skeptical triage** — a Skeptical Reviewer LLM attempts to disprove the
+patch over N rounds (`triage-rounds`, default 3). Each round reads all prior
+reasoning so later rounds can challenge earlier conclusions. After all rounds,
+an Arbiter LLM reads the full debate and issues a final verdict.
+
+### Reading triage output
+
+```
+[triage] verdict=VALID confidence=1.00 chain=VVV
+```
+
+| Field | Meaning |
+|---|---|
+| `verdict` | Arbiter's final decision: `VALID`, `INVALID`, or `UNCERTAIN` |
+| `confidence` | Arbiter's 0–10 score ÷ 10, expressed as 0.00–1.00 |
+| `chain` | One letter per reviewer round — `V`=VALID, `I`=INVALID, `U`=UNCERTAIN |
+
+**Chain examples:**
+
+| Chain | Interpretation |
+|---|---|
+| `VVV` | All 3 rounds agreed the patch is correct — highest confidence |
+| `VVI` | 2 rounds passed, 1 found a problem — arbiter may still accept if the objection was minor |
+| `IVV` | Reviewer initially objected but later rounds countered the argument |
+| `UUU` | Reviewer could not form a clear opinion — often means the bug or fix is context-dependent |
+| `III` | All rounds rejected — patch is almost certainly wrong or introduces a regression |
+
+A finding is accepted only when `verdict=VALID` **and** `confidence ≥ min-confidence`
+(default `0.6`). Patches that compile but fail triage are discarded; the finding
+is still logged so it contributes to diagnostic output.
+
 ## Components
 
 | Module | Role |
