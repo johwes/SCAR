@@ -100,6 +100,10 @@ def generate(
 
     if finding_line is not None:
         context_source = _extract_function_context(source, finding_line)
+        full_lines = source.count('\n') + 1
+        ctx_lines = context_source.count('\n') + 1
+        capped = " [capped]" if ctx_lines >= 300 else ""
+        print(f"  [context_gen] {Path(source_path).name}: {ctx_lines} lines{capped} (full file {full_lines}) around line {finding_line}", flush=True)
         source_header = f"File: {source_path} (function context around line {finding_line})\n\n"
     else:
         context_source = source
