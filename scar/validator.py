@@ -130,12 +130,16 @@ def _compile_flags_and_cwd(source_path: Path, repo_root: Path | None) -> tuple[l
 
 
 def _apply_patch(source: str, patch: str, filename: str) -> str | None:
-    """Apply a unified diff using the patch binary in strict batch mode.
+    """Apply a unified diff, falling back to a context-free Python applier.
 
-    Returns the patched text, or None if the patch does not apply cleanly.
-    --batch suppresses all interactive prompts so the process never hangs
-    in a headless Tekton container waiting for stdin.
+    Pass 1: standard patch binary with --fuzz=3 -l (tolerates minor context
+    drift and whitespace differences).
+    Pass 2: Python-based applier that ignores context lines entirely and
+    locates the change by hunk line number with a ±15-line search window.
+    This handles LLM-generated patches whose context lines are hallucinated
+    but whose +/- change lines and hunk header positions are correct.
     """
+    # ── Pass 1: patch binary ──────────────────────────────────────────────
     try:
         with tempfile.TemporaryDirectory() as tmp:
             src_file = Path(tmp) / filename
@@ -148,14 +152,89 @@ def _apply_patch(source: str, patch: str, filename: str) -> str | None:
             proc = subprocess.run(
                 [
                     "patch", "--batch", "-s",
-                    "--fuzz=3",      # tolerate up to 3 mismatched context lines
-                    "-l",            # ignore whitespace differences in context
+                    "--fuzz=3",
+                    "-l",
                     "-o", str(out_file), str(src_file), str(patch_file),
                 ],
                 capture_output=True, text=True, timeout=10,
             )
-            if proc.returncode != 0:
-                return None
-            return out_file.read_text(encoding="utf-8")
+            if proc.returncode == 0:
+                return out_file.read_text(encoding="utf-8")
+            print(f"[validator] patch binary failed, trying Python applier", flush=True)
     except Exception:
-        return None
+        pass
+
+    # ── Pass 2: context-free Python applier ───────────────────────────────
+    return _apply_patch_python(source, patch)
+
+
+def _apply_patch_python(source: str, patch: str) -> str | None:
+    """Context-free unified diff applier.
+
+    Parses each hunk, ignores context lines, and locates the block of
+    removed lines near the hunk's stated start position using a ±15-line
+    search window. Replaces that block with the added lines.
+    """
+    import re as _re
+    src_lines = source.splitlines(keepends=True)
+    result = list(src_lines)
+    offset = 0  # cumulative line shift from previously applied hunks
+
+    hunk_re = _re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+    i = 0
+    patch_lines = patch.splitlines(keepends=True)
+    while i < len(patch_lines):
+        m = hunk_re.match(patch_lines[i])
+        if not m:
+            i += 1
+            continue
+
+        old_start = int(m.group(1)) - 1  # 0-indexed
+        i += 1
+
+        removed, added = [], []
+        while i < len(patch_lines) and not hunk_re.match(patch_lines[i]):
+            line = patch_lines[i]
+            if line.startswith("-") and not line.startswith("---"):
+                removed.append(line[1:])
+            elif line.startswith("+") and not line.startswith("+++"):
+                added.append(line[1:])
+            # context lines (space-prefixed) are intentionally ignored
+            i += 1
+
+        if not removed and not added:
+            continue
+
+        # Locate the removed block near old_start (adjusted by prior hunks)
+        target = old_start + offset
+        found_at = None
+
+        if removed:
+            # Strip trailing whitespace for comparison to handle CRLF/LF drift
+            needle = [l.rstrip() for l in removed]
+            search_start = max(0, target - 15)
+            search_end = min(len(result), target + 15)
+            for pos in range(search_start, search_end):
+                if pos + len(removed) > len(result):
+                    break
+                window = [result[pos + j].rstrip() for j in range(len(removed))]
+                if window == needle:
+                    found_at = pos
+                    break
+            if found_at is None:
+                print(
+                    f"[validator] Python applier: could not locate removed block "
+                    f"near line {old_start + 1} — aborting",
+                    flush=True,
+                )
+                return None
+            result[found_at:found_at + len(removed)] = added
+            offset += len(added) - len(removed)
+        else:
+            # Pure insertion — no lines to locate, insert at target position
+            found_at = min(target, len(result))
+            result[found_at:found_at] = added
+            offset += len(added)
+
+    return "".join(result)
