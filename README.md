@@ -16,6 +16,7 @@ C source (x86)
               Stage 2: Patch Gen                          ─┤
               Stage 3: Validate + Triage                  ┘
                     └─> accepted patches              [Task: submit-results]
+                    └─> POST results to dashboard     [Task: report]
 ```
 
 `ikos-analyze`, `llm-scan`, and `osscrs-scan` run in parallel after bitcode
@@ -252,52 +253,146 @@ set both to the same value.
 
 Any OpenAI-compatible endpoint works: LiteLLM proxy, OpenAI, OpenRouter, vLLM, etc.
 
-## Running the Tekton Pipeline
+## Competition Dashboard
+
+A lightweight FastAPI dashboard collects pipeline results from all teams and displays a
+live leaderboard. Each team's `report` task POSTs its metrics to the dashboard at the
+end of every run. Teams are identified by their OpenShift namespace.
+
+### Scoring
+
+| Signal | Points |
+|---|---|
+| Each accepted patch | ×3 |
+| Each unique CWE class fixed | ×2 |
+| Each distinct scanner type that contributed a finding | ×1 (tool diversity bonus) |
+
+When teams are tied on score, tiebreakers are: fewest cumulative tokens (across all
+runs for that team), then fastest single-run time.
+
+### Deploy on OpenShift
 
 ```bash
-# Apply all tasks and the pipeline
-oc apply -f pipeline/tasks/
-oc apply -f pipeline/pipeline.yaml
+# Build and push the dashboard image
+podman build -t quay.io/jwesterl/scar-dashboard:latest containers/dashboard/
+podman push quay.io/jwesterl/scar-dashboard:latest
 
-# Create a PVC for the shared workspace
+# Deploy on the cluster
+oc new-app --image=quay.io/jwesterl/scar-dashboard:latest --name=scar-dashboard
+oc expose svc/scar-dashboard
+
+# Get the public route URL
+DASHBOARD_URL=$(oc get route scar-dashboard -o jsonpath='{.spec.host}')
+echo "Dashboard available at http://$DASHBOARD_URL"
+
+# Create a ConfigMap so pipeline runs can discover the dashboard
+oc create configmap scar-dashboard \
+  --from-literal=url="http://$DASHBOARD_URL"
+```
+
+Teams that do not have the `scar-dashboard` ConfigMap in their namespace will have the
+`report` task silently skip the POST — no pipeline changes needed.
+
+### Run locally (development)
+
+```bash
+cd containers/dashboard
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8080 --reload
+```
+
+Endpoints: `GET /` (leaderboard HTML, auto-refreshes every 30 s), `GET /leaderboard`
+(JSON), `POST /submit` (pipeline → dashboard), `GET /runs/{team_id}`.
+
+## Running the Tekton Pipeline
+
+### 1. Apply pipeline resources
+
+```bash
+# Shared workspace PVC
 oc apply -f pipeline/pvc.yaml
 
-# Build and push container images
-# scar-ikos only needs a rebuild if the IKOS image itself changes
+# All task definitions (includes report, stub-fuzzer, stub-custom-scan)
+oc apply -f pipeline/tasks/
+
+# Choose a pipeline variant — apply one:
+oc apply -f pipeline/pipeline-v1-llm-only.yaml   # LLM scan only, fastest
+oc apply -f pipeline/pipeline-v2-full.yaml        # IKOS + LLM + OSS-CRS (recommended)
+oc apply -f pipeline/pipeline-v3-extended.yaml    # v2 + stub slots for student tools
+```
+
+| Variant | Pipeline name | Analyzers |
+|---|---|---|
+| `pipeline-v1-llm-only.yaml` | `scar-v1` | LLM scan only |
+| `pipeline-v2-full.yaml` | `scar-v2` | IKOS + LLM + OSS-CRS |
+| `pipeline-v3-extended.yaml` | `scar-v3` | v2 + fuzzer-stub + custom-scan-stub |
+
+### 2. Build and push container images
+
+```bash
+# scar-ikos — rebuild only when the base IKOS image changes
 podman build -t quay.io/jwesterl/scar-ikos:latest containers/ikos/
 podman push quay.io/jwesterl/scar-ikos:latest
 
-# scar-agent contains the Python repair loop and libCRS bridge
+# scar-agent — rebuild after any change to scar/ Python source or task scripts
 podman build -t quay.io/jwesterl/scar-agent:latest containers/scar/
 podman push quay.io/jwesterl/scar-agent:latest
 
-# Run against the single-file test corpus
-tkn pipeline start scar \
+# scar-dashboard — rebuild after any change to containers/dashboard/
+podman build -t quay.io/jwesterl/scar-dashboard:latest containers/dashboard/
+podman push quay.io/jwesterl/scar-dashboard:latest
+```
+
+### 3. Create credentials
+
+See [Configuration](#configuration) above for the LLM secret, and
+[Competition Dashboard](#competition-dashboard) above for the dashboard ConfigMap.
+
+### 4. Start a pipeline run
+
+```bash
+# v1 — LLM scan only (quickest, good for a first test)
+tkn pipeline start scar-v1 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 
-# Run against the scarnet test corpus
-tkn pipeline start scar \
-  --param repo-url=https://github.com/johwes/scarnet \
+# v2 — full pipeline, single-file test corpus
+tkn pipeline start scar-v2 \
+  --param repo-url=https://github.com/johwes/scar-test-c \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 
-# Run against the multi-file OSS-Fuzz example
-tkn pipeline start scar \
+# v2 — multi-file OSS-Fuzz example
+tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --param source-dir=multifile \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
 
-# Run with an external OSS-CRS tool (Pattern B — unmodified upstream image)
-tkn pipeline start scar \
+# v2 — scarnet test corpus
+tkn pipeline start scar-v2 \
+  --param repo-url=https://github.com/johwes/scarnet \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --showlog
+
+# v2 — with an external OSS-CRS tool (Pattern B — unmodified upstream image)
+tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --param tool-image=ghcr.io/example/osscrs-tool:latest \
   --param tool-cmd="/usr/local/bin/scanner --src \$SANDBOX_SRC" \
   --workspace name=shared-data,claimName=scar-pvc \
   --showlog
+
+# v3 — student extension stubs included
+tkn pipeline start scar-v3 \
+  --param repo-url=https://github.com/johwes/scar-test-c \
+  --workspace name=shared-data,claimName=scar-pvc \
+  --showlog
 ```
+
+The `report` task at the end of every variant automatically POSTs results to the
+dashboard if the `scar-dashboard` ConfigMap is present in the namespace.
 
 ## Quick Start (CLI)
 
