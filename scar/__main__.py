@@ -44,10 +44,11 @@ def main() -> None:
 
     # ── IKOS findings ────────────────────────────────────────────────────────
     bridge = IkosSarifBridge(args.sarif, args.repo)
-    ikos_findings = bridge.parse()
     if not bridge.sarif_path.exists():
+        ikos_findings = []
         print(f"[scar] IKOS SARIF not found — skipping IKOS findings", flush=True)
     else:
+        ikos_findings = bridge.parse()
         print(f"[scar] {len(ikos_findings)} finding(s) from IKOS", flush=True)
 
     # Build a per-file line index for ±3-line sliding-window deduplication.

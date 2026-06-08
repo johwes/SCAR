@@ -36,7 +36,7 @@ class IkosSarifBridge:
         threshold = _rank.get(min_level, 2)
 
         if not self.sarif_path.exists():
-            return []  # IKOS did not run (e.g. LLM-only pipeline variant)
+            raise FileNotFoundError(f"SARIF report not found: {self.sarif_path}")
 
         with open(self.sarif_path) as fh:
             data = json.load(fh)
