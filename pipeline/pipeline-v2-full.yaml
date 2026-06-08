@@ -17,7 +17,7 @@ spec:
     - name: source-dir
       default: "."
     - name: triage-rounds
-      default: "5"
+      default: "3"
     - name: min-confidence
       default: "0.6"
     - name: tool-image
