@@ -134,7 +134,7 @@ spec:
           --enable=warning \
           --xml \
           --suppress=missingIncludeSystem \
-          --exclude="$WS/.scar" \
+          -i "$WS/.scar" \
           "$WS" 2>"$WS/.scar/cppcheck.xml" || true
         echo "Cppcheck XML written to .scar/cppcheck.xml"
 
