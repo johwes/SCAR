@@ -297,9 +297,89 @@ that had been running but contributing nothing for the entire project.
 
 ---
 
+## Stage 11 — Real-codebase hardening
+
+Running the full pipeline against scarnet — a real TCP server rather than a
+collection of toy programs — exposed three silent failures that had never
+appeared on the test corpus.
+
+**IKOS entry point strategy.** On scar-test-c, each program has its own
+`main` function and IKOS analyses each independently. On scarnet, a single
+`main` runs the accept loop, dispatching through several call frames before
+reaching any vulnerable code. Abstract interpretation applies widening
+operators at loop and call boundaries to guarantee convergence; over a deep
+call chain this loses interval precision. By the time IKOS reaches a
+`strcpy` call five frames in, the source string's length has been widened to
+`[0, +∞)` and the alarm may not fire.
+
+The entry point was changed from `main` to every public non-`main` API
+function in the linked binary (capped at 150 to avoid shell ARG_MAX limits on
+large targets like Nginx). IKOS then analyses each function with fully
+unconstrained inputs one frame deep, preserving the interval precision that
+degrades over deep whole-program chains.
+
+This change was still worth making, but it surfaced a more fundamental
+insight: even with perfect precision, IKOS cannot detect bugs that depend on
+*network input*. Knowing that a string came from a socket read tells IKOS
+nothing about its length — that fact is only known at runtime. On scar-test-c
+the inputs are literals; IKOS can bound them. On a TCP server every dangerous
+value is an attacker-controlled byte stream. The entry point fix improves
+IKOS precision for bounded programs; it does not change the input-domain
+problem on network servers.
+
+**OSS-Fuzz CCDB gap.** The LLM scan file discovery used the
+`compile_commands.json` database to identify which C files to scan. This
+works for normal build systems. OSS-Fuzz's `build.sh` convention compiles
+only the fuzz harness, not the server binary — so `main.c` had no CCDB
+entry and was silently skipped. The fix was to union CCDB files with non-CCDB
+files that pass a fuzz/test path filter: application code outside the CCDB
+gets scanned, harness files do not. The log now shows
+`5 C file(s) to scan (4 from CCDB, +1 outside CCDB)` so the gap is visible.
+
+**cppcheck flag silent failure.** The IKOS task runs cppcheck as a
+supplementary step and passes `-i .scar/` to exclude the build artefact
+directory. The cppcheck version in the container predated the `--exclude`
+flag; the invocation was silently producing empty XML. The flag was corrected
+to `-i "$WS/.scar"` which all versions support. Cppcheck findings were
+invisible until this was caught by watching the converted JSON output contain
+zero entries across every run.
+
+---
+
+## Stage 12 — Repair loop context audit
+
+The repair loop spends approximately 87% of the total token budget — roughly
+410k of 473k tokens on a typical scarnet run. The 13% spent on detection
+(the LLM scan) is nearly irrelevant to the cost.
+
+An external review of the repair loop code identified a structural oversight:
+`context_gen.py` does careful work to truncate source to function boundaries,
+capped at 300 lines. But `patch_gen.py` then reads the entire source file
+independently and appends it to the patch prompt. `triage.py` does the same
+— re-reading the full source into `base_context` and re-sending it at the
+start of every triage round.
+
+The truncation work was being undone one step later.
+
+The fix was to thread the briefing produced by `context_gen` through to both
+`patch_gen` and `triage`, replacing the full-file reads. The patch system
+prompt was updated to say "fix ALL occurrences visible in the security
+briefing" rather than "scan the ENTIRE source file" — an instruction that was
+impossible to follow once the full file was removed. Triage falls back to
+reading the full source only if no briefing is provided, preserving
+compatibility with direct CLI invocations. The agentic `GREP:` directive
+remains available in triage for any cross-function lookups the briefing
+doesn't cover.
+
+The token saving per finding scales with source file size and number of
+triage rounds. For scarnet's small files (~150 lines) the saving is moderate.
+For a larger target the compounding effect across rounds is significant.
+
+---
+
 ## What the evolution shows
 
-Looking across all ten stages, a pattern emerges: **every optimisation was
+Looking across all twelve stages, a pattern emerges: **every optimisation was
 motivated by observing a real run.**
 
 - The build robustness work (Stage 1) came from watching containers fail.
@@ -309,6 +389,11 @@ motivated by observing a real run.**
   fail to apply against the files the LLM had hallucinated context for.
 - The token optimisations (Stage 10) came from comparing token budgets across
   two runs on different corpora.
+- The entry point and file discovery fixes (Stage 11) came from running on a
+  real TCP server and watching tools silently produce no output.
+- The repair loop context audit (Stage 12) came from noticing that 87% of
+  tokens were spent in a loop that was re-sending context already truncated
+  elsewhere.
 
 The LLM contributes intelligence — it can recognise a format string
 vulnerability, generate a syntactically valid patch, and evaluate whether the
