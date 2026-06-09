@@ -15,7 +15,8 @@ from .sarif_bridge import Finding
 
 TRIAGE_SYSTEM_PROMPT = """\
 You are a skeptical security reviewer. You will be given a vulnerability \
-finding, the original source file, and a candidate patch.
+finding, a security briefing with the relevant source context, and a candidate \
+patch. Use GREP: <pattern> to look up any additional code you need.
 
 Your job is to find reasons the patch is WRONG or INSUFFICIENT:
 - Does it actually fix the root cause, or just the symptom?
@@ -69,9 +70,12 @@ def run(
     source_path: str | Path,
     repo_dir: str | Path,
     *,
+    briefing: str = "",
     rounds: int = 5,
 ) -> TriageResult:
-    source = Path(source_path).read_text(encoding="utf-8", errors="replace")
+    # Use the pre-truncated briefing rather than the full source file.
+    # Falls back to reading the full file only if no briefing was provided.
+    context_body = briefing if briefing else Path(source_path).read_text(encoding="utf-8", errors="replace")
     prior: list[str] = []
     verdicts: list[str] = []
 
@@ -79,7 +83,7 @@ def run(
         f"Finding: {finding.rule_id} at {finding.file_path}:{finding.line}\n"
         f"Message: {finding.message}\n\n"
         f"Patch:\n```diff\n{patch}\n```\n\n"
-        f"Source:\n```c\n{source}\n```"
+        f"Security Briefing:\n{context_body}"
     )
 
     for i in range(rounds):

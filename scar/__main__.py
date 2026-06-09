@@ -134,7 +134,7 @@ def main() -> None:
             continue
         print(f"  [3/3] Validation passed — running triage ({args.triage_rounds} rounds)", flush=True)
 
-        result = triage.run(finding, patch, source, args.repo, rounds=args.triage_rounds)
+        result = triage.run(finding, patch, source, args.repo, briefing=briefing, rounds=args.triage_rounds)
         print(f"  [triage] verdict={result.verdict} confidence={result.confidence:.2f} chain={result.chain}", flush=True)
 
         if result.verdict == "VALID" and result.confidence >= args.min_confidence:
