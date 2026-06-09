@@ -25,9 +25,13 @@ def main() -> None:
 
     all_c_files = sorted(scan_root.rglob("*.c"))
 
-    # If a compile_commands.json exists, restrict scanning to files that are
-    # part of the compiled library. This naturally excludes fuzzer harnesses,
-    # test drivers, and generated files that have no CCDB entry.
+    def _is_app_code(f: Path) -> bool:
+        """True for C files that are application code, not fuzz/test scaffolding."""
+        return (
+            "fuzz" not in f.name.lower()
+            and not any(p in ("test", "tests", "fuzzer", "fuzzers") for p in f.parts)
+        )
+
     ccdb_path = repo / ".scar" / "compile_commands.json"
     if ccdb_path.exists():
         try:
@@ -37,18 +41,24 @@ def main() -> None:
                 for e in entries
                 if e.get("file") and e.get("directory")
             }
-            c_files = [f for f in all_c_files if str(f.resolve()) in ccdb_files]
-            # Secondary filter: exclude fuzzer harnesses and test drivers even if
-            # bear captured them in the CCDB (e.g. from a combined compile+link step).
-            c_files = [f for f in c_files if "fuzz" not in f.name.lower()
-                       and not any(p in ("test", "tests", "fuzzer", "fuzzers")
-                                   for p in f.parts)]
-            print(f"[llm-scan] {len(c_files)} C file(s) to scan (filtered by compile_commands.json)", flush=True)
+            # Files in the CCDB (captures fuzz harnesses bear may have picked up).
+            ccdb_filtered = [f for f in all_c_files
+                             if str(f.resolve()) in ccdb_files and _is_app_code(f)]
+            # Files NOT in the CCDB that are still application code.
+            # OSS-Fuzz build scripts compile only the fuzz harness, not the server
+            # binary — so main.c has no CCDB entry even though it should be scanned.
+            non_ccdb = [f for f in all_c_files
+                        if str(f.resolve()) not in ccdb_files and _is_app_code(f)]
+            c_files = sorted(set(ccdb_filtered + non_ccdb))
+            extra_note = f", +{len(non_ccdb)} outside CCDB" if non_ccdb else ""
+            print(f"[llm-scan] {len(c_files)} C file(s) to scan "
+                  f"({len(ccdb_filtered)} from CCDB{extra_note})", flush=True)
         except Exception:
-            c_files = all_c_files
-            print(f"[llm-scan] {len(c_files)} C file(s) to scan (compile_commands.json unreadable — scanning all)", flush=True)
+            c_files = [f for f in all_c_files if _is_app_code(f)]
+            print(f"[llm-scan] {len(c_files)} C file(s) to scan "
+                  f"(compile_commands.json unreadable — scanning all)", flush=True)
     else:
-        c_files = all_c_files
+        c_files = [f for f in all_c_files if _is_app_code(f)]
         print(f"[llm-scan] {len(c_files)} C file(s) to scan", flush=True)
 
     findings = []
