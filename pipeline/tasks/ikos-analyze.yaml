@@ -71,17 +71,21 @@ spec:
             | grep -v 'internal\|private\|@llvm\.' \
             | sed -E 's/.*@([a-zA-Z_][a-zA-Z0-9_]*)\(.*/\1/' || true)
 
-          # If main is present, use it exclusively: this avoids ARG_MAX overflow
-          # on large targets (Nginx exports thousands of symbols).
-          if echo "$raw_symbols" | grep -q "^main$"; then
-            entry_pts="main"
+          # Use all public non-main API functions as entry points.
+          # IKOS then analyses each function with fully unconstrained inputs —
+          # one call frame deep — preserving the abstract-interval precision
+          # that degrades over deep whole-program chains from main.
+          # Cap at 150 symbols to avoid ARG_MAX on large targets like Nginx.
+          # Fall back to main only when no other public symbols exist.
+          api_symbols=$(echo "$raw_symbols" | grep -v '^main$' | head -n 150)
+          if [ -n "$api_symbols" ]; then
+            api_count=$(echo "$api_symbols" | wc -l | tr -d ' ')
+            entry_pts=$(echo "$api_symbols" | paste -sd, -)
+            echo "Entry points: $api_count public API functions (non-main)"
           else
-            entry_pts=$(echo "$raw_symbols" | paste -sd, - || true)
-          fi
-          if [ -z "$entry_pts" ]; then
             entry_pts="main"
+            echo "Entry points: main (no other public symbols found)"
           fi
-          echo "Entry points: $entry_pts"
 
           ikos \
             --entry-points="$entry_pts" \
