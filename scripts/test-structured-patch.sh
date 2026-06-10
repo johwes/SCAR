@@ -120,16 +120,16 @@ PYEOF
     # prompt for STRUCTURED_SYSTEM_PROMPT from patch_gen.py — that is the prompt
     # the real retry uses, not the diff-format prompt stored in the trace.
     if [[ -n "$FAILURE_HINT" ]]; then
+        # Derive repo root from the script's own location so this works regardless
+        # of the working directory (e.g. running from $home/openshift/ with the
+        # repo at $home/openshift/SCAR/).
+        REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
         STRUCTURED_PROMPT=$(python3 -c "
-import sys, os
-# Allow running from the repo root or the scripts/ directory.
-for p in ['.', '..']:
-    if os.path.isdir(os.path.join(p, 'scar')):
-        sys.path.insert(0, p)
-        break
+import sys
+sys.path.insert(0, sys.argv[1])
 from scar.patch_gen import STRUCTURED_SYSTEM_PROMPT
 print(STRUCTURED_SYSTEM_PROMPT)
-" 2>/dev/null)
+" "$REPO_ROOT" 2>/dev/null)
         if [[ -n "$STRUCTURED_PROMPT" ]]; then
             echo "[test] using STRUCTURED_SYSTEM_PROMPT from patch_gen.py (retry simulation)"
             SYSTEM_PROMPT="$STRUCTURED_PROMPT"
