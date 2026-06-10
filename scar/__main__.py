@@ -26,6 +26,7 @@ def _process_file_group(
     scar_dir: Path,
     ikos_findings: list[Finding],
     aux_origins: dict[int, str],
+    finding_ids: dict[int, int],
 ) -> list[dict]:
     """Process all findings for one source file sequentially.
 
@@ -42,7 +43,8 @@ def _process_file_group(
     for finding in findings:
         source = finding.file_path
         stem = Path(source).stem
-        tag = f"[{stem}]"   # prefix every line so interleaved logs stay readable
+        fid = finding_ids[id(finding)]
+        tag = f"[#{fid} {stem}:{finding.line}]"
         origin = "ikos" if finding in ikos_findings else aux_origins.get(id(finding), "llm")
 
         print(f"\n{tag} ── {finding.rule_id} @ {stem}:{finding.line} [{origin}] ──", flush=True)
@@ -160,7 +162,21 @@ def main() -> None:
         print(f"[scar] no auxiliary findings files found in .scar/", flush=True)
 
     all_findings = ikos_findings + aux_findings
-    print(f"[scar] {len(all_findings)} total finding(s) to process", flush=True)
+
+    # Assign stable sequential IDs before grouping so every log line for a
+    # finding carries the same ID regardless of which worker processes it.
+    finding_ids: dict[int, int] = {id(f): n for n, f in enumerate(all_findings, start=1)}
+
+    # Print the finding index up front so IDs can be cross-referenced later.
+    print(f"[scar] {len(all_findings)} finding(s) to process:", flush=True)
+    for finding in all_findings:
+        fid = finding_ids[id(finding)]
+        origin = "ikos" if finding in ikos_findings else aux_origins.get(id(finding), "llm")
+        print(
+            f"  #{fid:<3} {finding.rule_id:<12} "
+            f"{Path(finding.file_path).name}:{finding.line:<6} [{origin}]",
+            flush=True,
+        )
 
     # ── Parallel repair loop ─────────────────────────────────────────────────
     # Group findings by resolved file path. All findings for the same file run
@@ -184,7 +200,7 @@ def main() -> None:
         futures = {
             executor.submit(
                 _process_file_group,
-                findings, args, scar_dir, ikos_findings, aux_origins,
+                findings, args, scar_dir, ikos_findings, aux_origins, finding_ids,
             ): path
             for path, findings in by_file.items()
         }
