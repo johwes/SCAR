@@ -114,6 +114,7 @@ def _process_file_group(
                 patch = patch_gen.generate_structured(
                     finding, briefing, source, trace_dir=trace_dir,
                     failure_hint=f"{val.stage}: {val.detail}",
+                    previous_patch=patch,
                 )
                 val = validator.validate(patch, source, repo_root=args.repo)
             except Exception as exc:

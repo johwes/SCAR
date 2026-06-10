@@ -208,6 +208,7 @@ def generate_structured(
     source_path: str | Path,
     trace_dir: Path | None = None,
     failure_hint: str | None = None,
+    previous_patch: str | None = None,
 ) -> str:
     """Fallback patch synthesis using JSON-schema constrained generation.
 
@@ -215,6 +216,12 @@ def generate_structured(
     constructs the diff programmatically via difflib. The reasoning field
     acts as chain-of-thought, which improves scope and null-termination
     handling on small models.
+
+    When both previous_patch and failure_hint are supplied the call uses a
+    multi-turn correction loop: the model sees its own failed output as the
+    assistant turn, then receives a targeted correction message. This
+    outperforms embedding the hint in the original prompt because the model
+    must reason about what it produced and why it was wrong.
 
     Raises ValueError if the endpoint returns invalid JSON or an empty
     changes list so the caller can treat it as another validation failure.
@@ -229,14 +236,31 @@ def generate_structured(
         f"  File: {finding.file_path}:{finding.line}\n"
         f"  Message: {finding.message}\n\n"
         + (f"Occurrence count: {occurrence_note}\n\n" if occurrence_note else "")
-        + (f"Previous attempt failed — {failure_hint}. Do not repeat this mistake.\n\n" if failure_hint else "")
         + f"Source file ({source_path}):\n```c\n{source}\n```"
     )
 
-    messages = [
-        {"role": "system", "content": STRUCTURED_SYSTEM_PROMPT},
-        {"role": "user",   "content": user_content},
-    ]
+    if previous_patch and failure_hint:
+        # Multi-turn correction loop: model sees its own failed output as the
+        # assistant turn, then a targeted correction message as the next user
+        # turn. The hint belongs in the correction turn, not in user_content,
+        # so the model confronts mistake and correction together.
+        messages = [
+            {"role": "system",    "content": STRUCTURED_SYSTEM_PROMPT},
+            {"role": "user",      "content": user_content},
+            {"role": "assistant", "content": previous_patch},
+            {"role": "user",      "content": f"Your patch failed validation — {failure_hint}. Generate a corrected structured patch."},
+        ]
+    else:
+        # Single-turn fallback: embed hint at the top of user content if given.
+        if failure_hint:
+            user_content = (
+                f"Previous attempt failed — {failure_hint}. Do not repeat this mistake.\n\n"
+                + user_content
+            )
+        messages = [
+            {"role": "system", "content": STRUCTURED_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_content},
+        ]
 
     response_format = {
         "type": "json_schema",

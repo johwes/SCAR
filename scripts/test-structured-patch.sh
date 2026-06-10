@@ -51,6 +51,9 @@ else
 fi
 if [[ -n "$FAILURE_HINT" ]]; then
     echo "[test] hint     : $FAILURE_HINT"
+    if [[ -n "$TRACE_FILE" ]]; then
+        echo "[test] strategy : multi-turn correction loop (system → user → assistant → correction)"
+    fi
 fi
 echo ""
 
@@ -226,22 +229,32 @@ echo "[test] step 2/3 — trying response_format: json_schema..."
 PAYLOAD_SCHEMA=$(python3 -c "
 import json, sys
 system = sys.argv[1]; user = sys.argv[2]
-schema = json.loads(sys.argv[3]); model = sys.argv[4]; hint = sys.argv[5]
-if hint:
-    # Inject failure hint the same way generate_structured() does in patch_gen.py,
-    # prepending it just before the source file block.
-    marker = 'Source file ('
-    idx = user.find(marker)
-    if idx >= 0:
-        user = user[:idx] + f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user[idx:]
-    else:
-        user = f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user
+schema = json.loads(sys.argv[3]); model = sys.argv[4]
+hint = sys.argv[5]; previous = sys.argv[6]
+
+if hint and previous:
+    # Multi-turn correction loop: model sees its own failed output as the
+    # assistant turn, then a targeted correction as the next user turn.
+    # Mirrors exactly what generate_structured() does in patch_gen.py.
+    messages = [
+        {'role': 'system',    'content': system},
+        {'role': 'user',      'content': user},
+        {'role': 'assistant', 'content': previous},
+        {'role': 'user',      'content': f'Your patch failed validation — {hint}. Generate a corrected structured patch.'},
+    ]
+elif hint:
+    # No previous patch available — embed hint at top of user content.
+    user = f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user
+    messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
+else:
+    messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
+
 print(json.dumps({
     'model': model, 'temperature': 0.1,
-    'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
+    'messages': messages,
     'response_format': {'type': 'json_schema', 'json_schema': {'name': 'patch', 'strict': True, 'schema': schema}},
 }))
-" "$SYSTEM_PROMPT" "$USER_PROMPT" "$SCHEMA" "$MODEL" "$FAILURE_HINT")
+" "$SYSTEM_PROMPT" "$USER_PROMPT" "$SCHEMA" "$MODEL" "$FAILURE_HINT" "${ORIGINAL:-}")
 
 RESPONSE=$(send_request "$PAYLOAD_SCHEMA")
 SCHEMA_MODE="json_schema"
@@ -254,14 +267,8 @@ if ! echo "$RESPONSE" | has_choices; then
     echo "[test] step 3/3 — trying response_format: json_object..."
     PAYLOAD_OBJ=$(python3 -c "
 import json, sys
-system = sys.argv[1]; user = sys.argv[2]; model = sys.argv[3]; hint = sys.argv[4]
-if hint:
-    marker = 'Source file ('
-    idx = user.find(marker)
-    if idx >= 0:
-        user = user[:idx] + f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user[idx:]
-    else:
-        user = f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user
+system = sys.argv[1]; user = sys.argv[2]; model = sys.argv[3]
+hint = sys.argv[4]; previous = sys.argv[5]
 # Append schema as instruction since the endpoint won't enforce it
 system_ext = system + '''
 
@@ -273,12 +280,26 @@ You MUST respond with a single JSON object matching exactly this structure:
   ]
 }
 No markdown, no explanation outside the JSON object.'''
+
+if hint and previous:
+    messages = [
+        {'role': 'system',    'content': system_ext},
+        {'role': 'user',      'content': user},
+        {'role': 'assistant', 'content': previous},
+        {'role': 'user',      'content': f'Your patch failed validation — {hint}. Generate a corrected structured patch.'},
+    ]
+elif hint:
+    user = f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user
+    messages = [{'role': 'system', 'content': system_ext}, {'role': 'user', 'content': user}]
+else:
+    messages = [{'role': 'system', 'content': system_ext}, {'role': 'user', 'content': user}]
+
 print(json.dumps({
     'model': model, 'temperature': 0.1,
-    'messages': [{'role': 'system', 'content': system_ext}, {'role': 'user', 'content': user}],
+    'messages': messages,
     'response_format': {'type': 'json_object'},
 }))
-" "$SYSTEM_PROMPT" "$USER_PROMPT" "$MODEL" "$FAILURE_HINT")
+" "$SYSTEM_PROMPT" "$USER_PROMPT" "$MODEL" "$FAILURE_HINT" "${ORIGINAL:-}")
 
     RESPONSE=$(send_request "$PAYLOAD_OBJ")
     SCHEMA_MODE="json_object (prompt-enforced)"
