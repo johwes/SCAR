@@ -20,6 +20,41 @@ spec:
           exit 0
         fi
 
-        COUNT=$(python3 -c "import json,sys; print(len(json.load(open('$RESULTS'))))")
-        echo "Accepted patches: $COUNT"
-        cat "$RESULTS"
+        WS="$WS" python3 - <<'PYEOF'
+import json, os
+
+ws = os.environ.get("WS", "")
+results_path = ws + "/.scar/scar-results.json"
+rejected_path = ws + "/.scar/scar-rejected.json"
+
+accepted = json.loads(open(results_path).read()) if os.path.exists(results_path) else []
+rejected = json.loads(open(rejected_path).read()) if os.path.exists(rejected_path) else []
+
+print(f"\n{'═'*60}")
+print(f"  ACCEPTED PATCHES ({len(accepted)})")
+print(f"{'═'*60}")
+for p in accepted:
+    f = p["finding"]
+    t = p.get("triage", {})
+    from pathlib import Path
+    name = Path(f["file_path"]).name
+    conf = f'{t.get("confidence", 0):.2f}' if t else "n/a"
+    print(f"  ✓  [{p['origin']}] {f['rule_id']} @ {name}:{f['line']}  (conf={conf})")
+    if t.get("reason"):
+        print(f"       {t['reason'][:120]}")
+
+print(f"\n{'═'*60}")
+print(f"  REJECTED FINDINGS ({len(rejected)})")
+print(f"{'═'*60}")
+for r in rejected:
+    f = r["finding"]
+    from pathlib import Path
+    name = Path(f["file_path"]).name
+    stage = r.get("rejected_at", "unknown")
+    reason = r.get("reason", "")
+    print(f"  ✗  [{r['origin']}] {f['rule_id']} @ {name}:{f['line']}  (stage={stage})")
+    if reason:
+        print(f"       {reason[:120]}")
+
+print(f"{'═'*60}\n")
+PYEOF

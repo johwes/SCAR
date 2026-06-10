@@ -27,7 +27,7 @@ def _process_file_group(
     ikos_findings: list[Finding],
     aux_origins: dict[int, str],
     finding_ids: dict[int, int],
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """Process all findings for one source file sequentially.
 
     Findings run sequentially within each file group so that patch compounding
@@ -35,8 +35,12 @@ def _process_file_group(
     accepted patch to a per-file scratchpad before the next finding is
     processed. Today the source on disk is not mutated — each finding reads the
     original file. Sequential order is preserved but compounding is not yet active.
+
+    Returns (accepted, rejected) — both lists carry enough detail for the
+    summarise step to explain why each finding was accepted or rejected.
     """
     accepted = []
+    rejected = []
     whole_db = scar_dir / "whole_program.db"
     crs_patch_dir = scar_dir / "crs-patches"
 
@@ -71,7 +75,15 @@ def _process_file_group(
         print(f"{tag} [3/3] Validating patch...", flush=True)
         val = validator.validate(patch, source, repo_root=args.repo)
         if not val.passed:
-            print(f"{tag} [skip] Validation failed ({val.stage}): {val.detail}", flush=True)
+            reason = f"{val.stage}: {val.detail}"
+            print(f"{tag} [skip] Validation failed ({reason})", flush=True)
+            rejected.append({
+                "finding": finding.__dict__,
+                "patch": patch,
+                "origin": origin,
+                "rejected_at": "validation",
+                "reason": reason,
+            })
             continue
         print(f"{tag} [3/3] Validation passed — running triage ({args.triage_rounds} rounds)", flush=True)
 
@@ -90,8 +102,16 @@ def _process_file_group(
                 _crs.submit("patch", str(patch_file))
         else:
             print(f"{tag} [reject] {result.reason}", flush=True)
+            rejected.append({
+                "finding": finding.__dict__,
+                "patch": patch,
+                "origin": origin,
+                "rejected_at": "triage",
+                "triage": result.__dict__,
+                "reason": result.reason,
+            })
 
-    return accepted
+    return accepted, rejected
 
 
 def main() -> None:
@@ -199,6 +219,7 @@ def main() -> None:
     )
 
     accepted: list[dict] = []
+    rejected: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {
@@ -210,12 +231,17 @@ def main() -> None:
         }
         for future in as_completed(futures):
             try:
-                accepted.extend(future.result())
+                a, r = future.result()
+                accepted.extend(a)
+                rejected.extend(r)
             except Exception as exc:
                 print(f"[scar] worker error for {futures[future]}: {exc}", flush=True)
 
     Path(args.output).write_text(json.dumps(accepted, indent=2))
+    rejected_file = scar_dir / "scar-rejected.json"
+    rejected_file.write_text(json.dumps(rejected, indent=2))
     print(f"\n[scar] {len(accepted)} patch(es) accepted → {args.output}", flush=True)
+    print(f"[scar] {len(rejected)} finding(s) rejected → {rejected_file}", flush=True)
 
     usage = llm.get_usage()
     # Merge token counts from parallel tasks that ran in separate containers.
