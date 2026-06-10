@@ -1,0 +1,27 @@
+# Mount a SCAR pipeline workspace PVC for read-only inspection.
+#
+# Usage:
+#   1. Replace <YOUR-PVC-NAME> with the actual PVC name (see docs/inspecting-traces.md).
+#   2. oc apply -f scar-inspector-pod.yaml
+#   3. oc wait --for=condition=Ready pod/scar-inspector --timeout=60s
+#   4. oc exec -it scar-inspector -- bash
+#   5. oc delete pod scar-inspector   (when done)
+#
+apiVersion: v1
+kind: Pod
+metadata:
+  name: scar-inspector
+spec:
+  containers:
+    - name: inspector
+      image: registry.access.redhat.com/ubi9:latest
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: source
+          mountPath: /workspace/source
+          readOnly: true
+  volumes:
+    - name: source
+      persistentVolumeClaim:
+        claimName: <YOUR-PVC-NAME>
+  restartPolicy: Never

@@ -15,6 +15,7 @@ LLM_MODEL is sufficient for deployments that use one model for everything.
 import os
 import threading
 import time
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -89,3 +90,32 @@ def get_usage() -> dict:
             "completion_tokens": _completion_tokens,
             "total_tokens": _prompt_tokens + _completion_tokens,
         }
+
+
+def write_trace(
+    path: Path,
+    *,
+    title: str,
+    messages: list[dict],
+    response: str,
+    model: str,
+    temperature: float,
+    extra_sections: dict[str, str] | None = None,
+) -> None:
+    """Write a human-readable LLM interaction trace to path for student inspection.
+
+    Each trace file shows the exact prompt (system + user) and raw response for
+    one LLM call, plus any extra sections (grep results, IKOS witness trace, etc.).
+    Files are plain Markdown so students can read them with cat or any editor.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        f.write(f"# {title}\n\n")
+        f.write(f"**Model**: `{model}`  **Temperature**: {temperature}\n\n")
+        for msg in messages:
+            f.write(f"---\n\n## {msg['role'].capitalize()}\n\n{msg['content']}\n\n")
+        f.write(f"---\n\n## Response\n\n{response}\n")
+        if extra_sections:
+            for heading, content in extra_sections.items():
+                if content:
+                    f.write(f"\n---\n\n## {heading}\n\n{content}\n")

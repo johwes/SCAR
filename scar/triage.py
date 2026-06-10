@@ -73,6 +73,7 @@ def run(
     briefing: str = "",
     rounds: int = 5,
     tag: str = "",
+    trace_dir: Path | None = None,
 ) -> TriageResult:
     # Use the pre-truncated briefing rather than the full source file.
     # Falls back to reading the full file only if no briefing was provided.
@@ -88,6 +89,8 @@ def run(
         f"Security Briefing:\n{context_body}"
     )
 
+    review_model = llm.review_model()
+
     for i in range(rounds):
         print(f"{prefix}[triage round {i+1}/{rounds}] reviewing...", flush=True)
         prior_text = "\n\n---\n".join(prior) if prior else "None yet."
@@ -99,13 +102,29 @@ def run(
             {"role": "user", "content": user_content},
         ]
 
-        response = llm.chat(messages, model=llm.review_model(), temperature=0.2)
+        raw_response = llm.chat(messages, model=review_model, temperature=0.2)
 
-        directives = grep_tool.extract_directives(response)
+        grep_results = ""
+        directives = grep_tool.extract_directives(raw_response)
         if directives:
-            grep_results = grep_tool.execute(directives, repo_dir)
-            if grep_results:
-                response += f"\n\n{grep_results}"
+            r = grep_tool.execute(directives, repo_dir)
+            if r:
+                grep_results = r
+
+        response = raw_response
+        if grep_results:
+            response += f"\n\n{grep_results}"
+
+        if trace_dir is not None:
+            llm.write_trace(
+                trace_dir / f"3-triage-round-{i+1}.md",
+                title=f"Triage Round {i+1}/{rounds}",
+                messages=messages,
+                response=raw_response,
+                model=review_model,
+                temperature=0.2,
+                extra_sections={"Grep Results": grep_results} if grep_results else None,
+            )
 
         prior.append(response)
         match = _VERDICT_RE.search(response)
@@ -127,7 +146,17 @@ def run(
         {"role": "system", "content": ARBITER_PROMPT},
         {"role": "user", "content": arbiter_input},
     ]
-    arbiter_response = llm.chat(arbiter_messages, model=llm.review_model(), temperature=0.0)
+    arbiter_response = llm.chat(arbiter_messages, model=review_model, temperature=0.0)
+
+    if trace_dir is not None:
+        llm.write_trace(
+            trace_dir / "4-arbiter.md",
+            title="Arbiter — Final Verdict",
+            messages=arbiter_messages,
+            response=arbiter_response,
+            model=review_model,
+            temperature=0.0,
+        )
 
     return _parse_result(arbiter_response, verdicts, rounds)
 

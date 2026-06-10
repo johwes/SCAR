@@ -43,6 +43,7 @@ def generate(
     finding: Finding,
     briefing: str,
     source_path: str | Path,
+    trace_dir: Path | None = None,
 ) -> str:
     """Return a unified diff patch for the given finding."""
     source = Path(source_path).read_text(encoding="utf-8", errors="replace")
@@ -61,4 +62,17 @@ def generate(
         {"role": "user", "content": user_content},
     ]
 
-    return llm.chat(messages, model=llm.patch_model(), temperature=0.1)
+    model = llm.patch_model()
+    patch = llm.chat(messages, model=model, temperature=0.1)
+
+    if trace_dir is not None:
+        llm.write_trace(
+            trace_dir / "2-patch-gen.md",
+            title=f"Patch Generation — {Path(source_path).name}:{finding.line}",
+            messages=messages,
+            response=patch,
+            model=model,
+            temperature=0.1,
+        )
+
+    return patch

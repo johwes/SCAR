@@ -94,6 +94,7 @@ def generate(
     witness_db: Path | None = None,
     finding_line: int | None = None,
     tag: str = "",
+    trace_dir: Path | None = None,
 ) -> str:
     """Return a security briefing for source_path, enriched with grep results
     and (when available) the IKOS counterexample witness trace."""
@@ -116,17 +117,43 @@ def generate(
         {"role": "user", "content": source_header + context_source},
     ]
 
-    briefing = llm.chat(messages, model=llm.patch_model(), temperature=0.1)
+    model = llm.patch_model()
+    raw_briefing = llm.chat(messages, model=model, temperature=0.1)
 
-    directives = grep_tool.extract_directives(briefing)
+    grep_results = ""
+    directives = grep_tool.extract_directives(raw_briefing)
     if directives:
-        grep_results = grep_tool.execute(directives, repo_dir)
-        if grep_results:
-            briefing += f"\n\n--- Grep Results ---\n{grep_results}"
+        r = grep_tool.execute(directives, repo_dir)
+        if r:
+            grep_results = r
 
+    ikos_trace = ""
     if witness_db is not None and finding_line is not None:
-        trace = ikos_witness.extract(witness_db, str(source_path), finding_line)
-        if trace:
-            briefing += f"\n\n--- IKOS Witness Trace ---\n{trace}"
+        t = ikos_witness.extract(witness_db, str(source_path), finding_line)
+        if t:
+            ikos_trace = t
+
+    briefing = raw_briefing
+    if grep_results:
+        briefing += f"\n\n--- Grep Results ---\n{grep_results}"
+    if ikos_trace:
+        briefing += f"\n\n--- IKOS Witness Trace ---\n{ikos_trace}"
+
+    if trace_dir is not None:
+        fname = f"{Path(source_path).name}:{finding_line}" if finding_line else Path(source_path).name
+        extra: dict[str, str] = {}
+        if grep_results:
+            extra["Grep Results"] = grep_results
+        if ikos_trace:
+            extra["IKOS Witness Trace"] = ikos_trace
+        llm.write_trace(
+            trace_dir / "1-context-briefing.md",
+            title=f"Context Briefing — {fname}",
+            messages=messages,
+            response=raw_briefing,
+            model=model,
+            temperature=0.1,
+            extra_sections=extra or None,
+        )
 
     return briefing
