@@ -31,7 +31,13 @@ if [[ "${1:-}" == "--trace" ]]; then
     TRACE_FILE="${2:?--trace requires a path argument}"
 fi
 
-echo "[test] endpoint : $BASE_URL"
+# Normalise endpoint: LLM_BASE_URL includes /v1 (OpenAI client convention),
+# so append only /chat/completions. Strip trailing slash first.
+ENDPOINT="${BASE_URL%/}"
+[[ "$ENDPOINT" == */v1 ]] || ENDPOINT="$ENDPOINT/v1"
+ENDPOINT="$ENDPOINT/chat/completions"
+
+echo "[test] endpoint : $ENDPOINT"
 echo "[test] model    : $MODEL"
 echo "[test] mode     : ${TRACE_FILE:+trace file: $TRACE_FILE}${TRACE_FILE:-built-in example}"
 echo ""
@@ -169,7 +175,7 @@ RESPONSE=$(curl -s \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD" \
-    "$BASE_URL/v1/chat/completions")
+    "$ENDPOINT")
 
 # Check for API-level error
 if ! echo "$RESPONSE" | python3 -c "
