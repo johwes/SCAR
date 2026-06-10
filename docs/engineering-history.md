@@ -377,9 +377,180 @@ For a larger target the compounding effect across rounds is significant.
 
 ---
 
+## Stage 13 — Concurrency, correctness under review, and log observability
+
+### Field correction to Stage 12
+
+Before the parallelism work, a regression from Stage 12 needed fixing.
+Threading the pre-generated briefing through to `patch_gen` (the natural
+extension of the same briefing-threading done for triage) produced a 14% drop
+in accepted patches — from 14 to 12 — on a real scarnet run. The root cause:
+patch synthesis needs the full source to correctly reference constants, struct
+fields, and types defined outside the vulnerable function. The function-bounded
+briefing deliberately excludes that context. Triage is tolerant of this
+truncation because the agentic `GREP:` directive covers cross-function lookups;
+patch generation is not. `patch_gen` was reverted to reading the full source,
+while triage kept the briefing-only approach where the saving across up to five
+rounds per finding is substantial.
+
+The lesson is narrow but important: the same briefing works differently in
+different roles. Triage is adversarial and exploratory — gaps can be filled by
+grep. Patch synthesis is constructive and needs a complete picture of the
+codebase before generating code that compiles.
+
+### Two bugs from external review
+
+An external architecture review identified two correctness bugs that had gone
+unnoticed in earlier testing.
+
+**Tool diversity miscounting.** `scar-report.yaml` computes `tool_diversity`
+as the number of unique `origin` strings across all accepted patches. This
+rewards multi-tool pipelines — finding the same bug with both a fuzzer and
+static analysis is more valuable than finding it twice with the same tool. The
+origin was supposed to come from the filename: `findings-fuzzer.json` should
+produce `origin = "fuzzer"`, and `findings-cppcheck.json` should produce
+`origin = "cppcheck"`. In practice, every non-IKOS finding was stamped
+`"llm"` — the default from an unrelated code path that was reached before the
+filename-based extraction ran. Fuzzer and cppcheck patches were accepted but
+counted as a single tool. The fix extracted the tool name from the filename
+stem at load time and stored it in a parallel `id(finding) → tool_name` dict,
+looked up during patch acceptance.
+
+**Validator comment false-positive.** The validator's safety checks run regex
+patterns against the lines added by a patch. One pattern caught `strcpy(` in
+added code. A patch that replaced `strcpy` with `strncpy` would naturally
+include a code comment explaining the change — something like
+`/* replaced strcpy( with strncpy */`. The regex matched the comment, not the
+call, and rejected the patch. The fix stripped line and block comments from the
+added and removed code before running all three safety patterns, so the check
+fires only on actual code.
+
+Both bugs are the kind that testing on toy corpora misses. On scar-test-c,
+tools rarely find the same bug through different paths, so the diversity
+miscounting didn't change any score. Simple patches on short files rarely
+produce explanatory comments, so the comment trap never fired.
+
+### Motivating the parallel repair loop
+
+A complete pipeline run against scarnet produced wall-clock data: 48 minutes
+54 seconds, 501,492 tokens, 12 accepted patches, score 62. The breakdown
+showed IKOS taking under a minute and the LLM scan running sequentially across
+5 files — roughly 10 minutes — while the repair loop ran 12 findings
+sequentially at roughly 3 minutes each for a total of around 36 minutes.
+
+For a 3-hour student workshop where one or two pipeline runs provide the
+entire learning feedback loop, 49 minutes per run is a serious constraint.
+Halving it would double the iterations students can attempt.
+
+### Parallel repair loop
+
+Findings were already being read from multiple independent tools. The repair
+loop itself was the last sequential bottleneck.
+
+The core observation is that findings in *different source files* are
+independent: fixing `handler.c:46` does not affect the source visible when
+fixing `parse.c:31`. Findings in the *same* file are not fully independent —
+a future patch-compounding feature would apply each accepted patch to a
+per-file scratchpad before processing the next finding, so ordering within a
+file matters. The design respects this distinction:
+
+- Findings are grouped by resolved file path.
+- Each file group runs sequentially inside one `ThreadPoolExecutor` worker.
+- Different file groups run concurrently across workers.
+- Concurrency is capped at `--max-workers` (default 4) so the loop stays
+  predictable on large projects.
+
+On a scarnet run with findings spread across 4 files, this reduces repair-loop
+wall time from ~36 minutes to ~9 minutes — one worker per file, bounded by the
+slowest file group rather than the sum of all.
+
+Patch compounding — actually writing each accepted patch back to a per-file
+scratchpad before the next finding — is preserved as future work. The
+sequential-within-group order is the structural foundation; the scratchpad
+mechanism is not yet implemented, and today each finding reads the original
+file from disk. Mutating source files mid-pipeline was considered and rejected:
+if the pipeline is interrupted after partial mutations, the source tree is left
+in an indeterminate state that makes reruns unreliable.
+
+### Thread safety
+
+The `ThreadPoolExecutor` immediately surfaced a race condition in `llm.py`.
+Python's `_prompt_tokens += response.usage.prompt_tokens` compiles to three
+bytecodes — LOAD, BINARY_ADD, STORE. The GIL can yield between any two of
+them. Under concurrent workers, increments from different threads interleave,
+silently dropping some counts. The token total is used as a leaderboard
+tiebreaker; silent corruption matters.
+
+The fix added a `threading.Lock()` protecting both the token counters and the
+lazy `_client` singleton. The singleton race is less likely (first
+initialisation happens before workers start) but is a correctness issue
+regardless. `get_usage()` is also guarded so callers always observe a
+consistent snapshot.
+
+Two-model deployments (`LLM_PATCH_MODEL` and `LLM_REVIEW_MODEL`) work without
+changes: the `model` parameter is per-request, not per-client. The single
+`OpenAI` client is an HTTP connection pool, and both models share it.
+
+### Parallel LLM scan
+
+Once IKOS timing was measured precisely — seconds, not the minutes initially
+assumed — the LLM scan became the identified bottleneck in the pre-repair
+phase. Files in the LLM scan are fully independent (unlike repair-loop
+findings, there is no compounding question), so the parallelism is
+straightforward: a `ThreadPoolExecutor` with the same 4-worker default as the
+repair loop, each worker scanning one file end-to-end.
+
+The measured improvement: 5 files scanning in ~2 minutes concurrently versus
+~10 minutes sequentially. Combined with the parallel repair loop, the expected
+total pipeline time drops from 49 minutes to roughly 13–15 minutes.
+
+The `scan_cmd.py` invocation signature was simultaneously moved from `sys.argv`
+slices to `argparse`, adding a `--max-workers` flag, without changing the
+Tekton task YAML — the positional arguments are backward-compatible.
+
+### Log observability: three iterations
+
+Parallel workers produce interleaved output. Without labelling, a Tekton log
+showing 40 `[triage round N/3] reviewing...` lines is unreadable — it is
+impossible to tell which lines belong to which finding.
+
+Three iterations of log labelling addressed this progressively.
+
+**Iteration 1 — file stem prefix** (`[handler]`, `[parse]`): each
+`_process_file_group` worker prefixes its own log lines with the source file
+stem. Workers for different files are now distinguishable. The prefix was
+propagated through `context_gen.generate()` and `triage.run()` — both
+previously printed bare lines — via a `tag: str = ""` parameter. Callers pass
+their tag; callees prepend it.
+
+**Iteration 2 — the stem tag's limitation**: two findings in the same file
+(`handler.c:46` and `handler.c:80`) produce identical prefixes. Since findings
+in the same file run sequentially in one worker, the output does not interleave
+— but the stem tag cannot distinguish them in post-hoc analysis, and the
+finding IDs are not visible in the flow.
+
+**Iteration 3 — per-finding `[#N file:line]` tags with global index**: stable
+sequential IDs are assigned to all findings before any worker starts, so every
+log line — briefing, patch generation, triage rounds, arbiter — carries the
+same `[#2 handler:80]` label regardless of which worker produced it. A finding
+index is printed at the start of the repair loop:
+
+```
+[scar] 3 finding(s) to process:
+  #1  CWE-121      handler.c:46   [ikos]
+  #2  CWE-416      handler.c:80   [llm-scan]
+  #3  CWE-122      parse.c:31     [llm-scan]
+```
+
+A complete trace for finding #2 — from briefing through arbiter — is then
+recoverable with `grep '\[#2'` against the full Tekton log. This is the
+debugging primitive that makes parallel logs navigable.
+
+---
+
 ## What the evolution shows
 
-Looking across all twelve stages, a pattern emerges: **every optimisation was
+Looking across all thirteen stages, a pattern emerges: **every optimisation was
 motivated by observing a real run.**
 
 - The build robustness work (Stage 1) came from watching containers fail.
@@ -394,14 +565,23 @@ motivated by observing a real run.**
 - The repair loop context audit (Stage 12) came from noticing that 87% of
   tokens were spent in a loop that was re-sending context already truncated
   elsewhere.
+- The briefing correction (Stage 13) came from measuring a 14% drop in
+  accepted patches after extending truncation to patch synthesis.
+- The parallelism work (Stage 13) came from measuring a 49-minute wall-clock
+  run and identifying the LLM scan and repair loop as sequential bottlenecks.
+- The thread safety fix (Stage 13) came from adding a thread pool and
+  immediately recognising that `+=` on a shared counter is not atomic.
+- The per-finding log tags (Stage 13) came from discovering that file-stem
+  prefixes don't distinguish two findings in the same file.
 
 The LLM contributes intelligence — it can recognise a format string
 vulnerability, generate a syntactically valid patch, and evaluate whether the
 patch fixes the root cause. But the system around it is engineered: the
 parallel task structure, the deduplication window, the two-pass patch
 application, the pluggable findings convention, the brace-counting heuristic,
-the early-exit condition. None of those came from a model. They came from
-identifying failure modes and designing around them.
+the early-exit condition, the thread-safe token counters, the per-finding log
+index. None of those came from a model. They came from identifying failure
+modes and designing around them.
 
 That is what building a system with LLMs at the centre looks like: the model
 is one component, and the engineering discipline of making it reliable,
