@@ -548,9 +548,111 @@ debugging primitive that makes parallel logs navigable.
 
 ---
 
+## Stage 14 — Trace-based audit and prompt engineering from evidence
+
+### The question that motivated the audit
+
+After the trace writing was in place, a natural question arose: is the context
+we send to the model actually good? The prompts had been written by reasoning
+about what the model should need. But reasoning about prompts is not the same
+as reading what the model actually received and produced.
+
+The traces made that reading possible for the first time. A 30-minute audit
+of a single run's `.scar/traces/` directory answered the question directly.
+
+### What the audit found
+
+The methodology was simple. The arbiter file (`4-arbiter.md`) only exists for
+findings that reached triage. Findings without one were rejected at validation —
+the patch was generated but couldn't be applied. Grepping for the actual
+`VERDICT:` line in every arbiter file revealed that all 12 findings which
+reached triage were accepted. The triage acceptance rate was 100%. All 3
+rejections happened before triage ran.
+
+This was the first concrete answer to the context quality question: the
+briefings were not the problem. The LLM correctly understood the
+vulnerabilities in all 15 cases. The failures were entirely in patch synthesis
+— translating correct understanding into a valid unified diff.
+
+### Three failure modes, three root causes
+
+Reading the `2-patch-gen.md` file for each of the three rejected findings
+revealed distinct failure modes.
+
+**Hallucinated hunk.** One finding had a single `strcpy(out->key, tok)` in the
+code. The patch system prompt said "Fix ALL occurrences in a single multi-hunk
+patch." With no count to anchor against, the LLM generated two hunks — the
+second targeting a line where no such call existed. The standard patch command
+and the Python fallback both failed to apply it because the removed block
+wasn't there.
+
+The briefing showed exactly one occurrence. The prompt implied there should be
+more. The LLM resolved that tension by inventing one.
+
+**Variable redeclaration.** A second finding correctly identified four `atoi`
+and `atol` calls in the same function that needed replacing with `strtol` plus
+a bounds check. The patch correctly produced four hunks. Each hunk also
+declared `long val`. In C you cannot declare the same variable four times in
+the same function scope. The recompilation step in the validator caught it.
+
+The LLM applied the fix pattern to each occurrence independently, without
+tracking that all four hunks shared a scope.
+
+**Malformed diff structure.** A third finding produced a patch with a wrong
+directory prefix in the file path (`source/main.c` instead of `src/main.c`)
+and a hunk count that claimed seven lines where only four followed. The patch
+was semantically correct — the format string fix was right — but the diff
+structure was broken. Even if it had applied, a signature mismatch between the
+call site and the function definition would have failed recompilation; that
+cross-file dependency was outside the scope of a single-finding patch.
+
+### Fixes applied
+
+**Occurrence count injection.** Before patch synthesis, `patch_gen` now looks
+up the exact text of the vulnerable line in the full source and counts exact
+matches. That count is injected into the prompt as a hard constraint: "The
+vulnerable line appears exactly once in this file. Generate exactly 1 hunk."
+This removes the ambiguity that drove the hallucination. If there are two real
+occurrences, the count is two and the LLM generates two hunks — correctly,
+because the number is now a fact rather than an inference.
+
+**C scoping rule.** A sentence was added to the patch system prompt: when
+fixing multiple occurrences in the same function, do not re-declare the same
+local variable in each hunk. The instruction is narrow and directly addresses
+the redeclaration failure without constraining unrelated cases.
+
+**Third failure left as-is.** The malformed diff structure and signature
+mismatch are LLM generation errors that the validator correctly caught. The
+root cause fix for the format string vulnerability was independently accepted
+through finding #13, which patched the function definition in `util.c`. Fixing
+the call-site patch would require cross-file awareness that the current
+architecture doesn't provide.
+
+### What this stage demonstrates
+
+The trace audit changed the debugging workflow from guessing to reading. Before
+traces, diagnosing a low acceptance rate meant re-running with different
+parameters and watching scores change. After traces, the exact prompt, the
+exact response, and the exact failure point are on disk and readable with
+`cat`.
+
+The two prompt changes that resulted — occurrence count injection and the
+scoping rule — were derived entirely from reading actual failure cases. No
+prompt change was made speculatively. This is the difference between prompt
+engineering by intuition and prompt engineering by evidence.
+
+A broader methodology note: the traces showed that triage was not the weak
+link. Without that data, it would have been natural to assume that a 20%
+rejection rate indicated problems with the triage prompts — more rounds, a
+different arbiter temperature, a more aggressive system prompt. All of that
+would have been wrong. The validator was doing its job. The problem was
+upstream, in synthesis. Evidence from traces pointed to the right place.
+
+---
+
 ## What the evolution shows
 
-Looking across all thirteen stages, a pattern emerges: **every optimisation was
+Looking across all fourteen stages, a pattern emerges: **every optimisation was
 motivated by observing a real run.**
 
 - The build robustness work (Stage 1) came from watching containers fail.
@@ -573,6 +675,9 @@ motivated by observing a real run.**
   immediately recognising that `+=` on a shared counter is not atomic.
 - The per-finding log tags (Stage 13) came from discovering that file-stem
   prefixes don't distinguish two findings in the same file.
+- The occurrence count injection and scoping rule (Stage 14) came from reading
+  the actual diffs the LLM produced for three rejected findings and identifying
+  their root causes directly from the trace files.
 
 The LLM contributes intelligence — it can recognise a format string
 vulnerability, generate a syntactically valid patch, and evaluate whether the
@@ -580,8 +685,9 @@ patch fixes the root cause. But the system around it is engineered: the
 parallel task structure, the deduplication window, the two-pass patch
 application, the pluggable findings convention, the brace-counting heuristic,
 the early-exit condition, the thread-safe token counters, the per-finding log
-index. None of those came from a model. They came from identifying failure
-modes and designing around them.
+index, the occurrence count injected into the synthesis prompt. None of those
+came from a model. They came from identifying failure modes and designing
+around them.
 
 That is what building a system with LLMs at the centre looks like: the model
 is one component, and the engineering discipline of making it reliable,
