@@ -64,7 +64,13 @@ re-declare the same local variable in each fix; use block scoping \
 Each entry has:
   "line"  — 1-based line number in the source file
   "old"   — the exact original line text (including indentation)
-  "new"   — the replacement text; use \\n to insert multiple lines
+  "new"   — the replacement for ONLY that one line. Do NOT include any \
+lines that already exist before or after it in the source — those are \
+untouched and must not appear in "new". Use \\n only to expand a single \
+line into multiple replacement lines (e.g. adding a NUL-terminator after \
+strncpy). To insert a guard BEFORE line N: set "old" to line N's text, \
+set "new" to "<guard>\\n<line N text>" — the original line is preserved \
+as the last part of "new".
 
 Rules for the changes:
 - Generate exactly as many entries as the occurrence count states
