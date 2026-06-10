@@ -116,6 +116,29 @@ PYEOF
     USER_PROMPT=$(echo   "$PROMPTS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['user'])")
     ORIGINAL=$(echo      "$PROMPTS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['original'])")
 
+    # When simulating the structured retry (--failure-hint set), swap the system
+    # prompt for STRUCTURED_SYSTEM_PROMPT from patch_gen.py — that is the prompt
+    # the real retry uses, not the diff-format prompt stored in the trace.
+    if [[ -n "$FAILURE_HINT" ]]; then
+        STRUCTURED_PROMPT=$(python3 -c "
+import sys, os
+# Allow running from the repo root or the scripts/ directory.
+for p in ['.', '..']:
+    if os.path.isdir(os.path.join(p, 'scar')):
+        sys.path.insert(0, p)
+        break
+from scar.patch_gen import STRUCTURED_SYSTEM_PROMPT
+print(STRUCTURED_SYSTEM_PROMPT)
+" 2>/dev/null)
+        if [[ -n "$STRUCTURED_PROMPT" ]]; then
+            echo "[test] using STRUCTURED_SYSTEM_PROMPT from patch_gen.py (retry simulation)"
+            SYSTEM_PROMPT="$STRUCTURED_PROMPT"
+        else
+            echo "[test] warning: could not import STRUCTURED_SYSTEM_PROMPT — using trace system prompt"
+        fi
+        echo ""
+    fi
+
     echo "=== Original response (from trace) ==="
     echo "$ORIGINAL"
     echo ""
