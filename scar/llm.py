@@ -13,6 +13,7 @@ LLM_MODEL is sufficient for deployments that use one model for everything.
 """
 
 import os
+import threading
 import time
 
 from openai import OpenAI
@@ -21,19 +22,20 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 3.0  # seconds; doubled each attempt
 
 _client: OpenAI | None = None
-
 _prompt_tokens: int = 0
 _completion_tokens: int = 0
+_lock = threading.Lock()
 
 
 def _get_client() -> OpenAI:
     global _client
-    if _client is None:
-        _client = OpenAI(
-            base_url=os.environ["LLM_BASE_URL"],
-            api_key=os.environ["LLM_API_KEY"],
-        )
-    return _client
+    with _lock:
+        if _client is None:
+            _client = OpenAI(
+                base_url=os.environ["LLM_BASE_URL"],
+                api_key=os.environ["LLM_API_KEY"],
+            )
+        return _client
 
 
 def patch_model() -> str:
@@ -62,8 +64,9 @@ def chat(messages: list[dict], *, model: str, temperature: float = 0.2) -> str:
                 temperature=temperature,
             )
             if response.usage:
-                _prompt_tokens += response.usage.prompt_tokens
-                _completion_tokens += response.usage.completion_tokens
+                with _lock:
+                    _prompt_tokens += response.usage.prompt_tokens
+                    _completion_tokens += response.usage.completion_tokens
             return response.choices[0].message.content or ""
         except Exception as exc:
             last_exc = exc
@@ -80,8 +83,9 @@ def chat(messages: list[dict], *, model: str, temperature: float = 0.2) -> str:
 
 def get_usage() -> dict:
     """Return accumulated token counts across all chat() calls this process."""
-    return {
-        "prompt_tokens": _prompt_tokens,
-        "completion_tokens": _completion_tokens,
-        "total_tokens": _prompt_tokens + _completion_tokens,
-    }
+    with _lock:
+        return {
+            "prompt_tokens": _prompt_tokens,
+            "completion_tokens": _completion_tokens,
+            "total_tokens": _prompt_tokens + _completion_tokens,
+        }

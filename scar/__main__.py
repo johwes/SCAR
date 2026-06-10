@@ -29,9 +29,11 @@ def _process_file_group(
 ) -> list[dict]:
     """Process all findings for one source file sequentially.
 
-    Keeping findings for the same file sequential preserves patch-compounding
-    order: a later finding in the same file sees the state after any earlier
-    accepted patch has been applied to the scratchpad.
+    Findings run sequentially within each file group so that patch compounding
+    can be added later without restructuring: future work will apply each
+    accepted patch to a per-file scratchpad before the next finding is
+    processed. Today the source on disk is not mutated — each finding reads the
+    original file. Sequential order is preserved but compounding is not yet active.
     """
     accepted = []
     whole_db = scar_dir / "whole_program.db"
@@ -39,38 +41,40 @@ def _process_file_group(
 
     for finding in findings:
         source = finding.file_path
-        origin = "ikos" if finding in ikos_findings else aux_origins.get(id(finding), "llm")
-        print(f"\n[scar] ── {finding.rule_id} @ {source}:{finding.line} [{origin}] ──", flush=True)
-        print(f"  {finding.message}", flush=True)
-
-        print(f"  [1/3] Generating security briefing...", flush=True)
         stem = Path(source).stem
+        tag = f"[{stem}]"   # prefix every line so interleaved logs stay readable
+        origin = "ikos" if finding in ikos_findings else aux_origins.get(id(finding), "llm")
+
+        print(f"\n{tag} ── {finding.rule_id} @ {stem}:{finding.line} [{origin}] ──", flush=True)
+        print(f"{tag}   {finding.message}", flush=True)
+
+        print(f"{tag} [1/3] Generating security briefing...", flush=True)
         witness_db = whole_db if whole_db.exists() else scar_dir / f"{stem}.db"
         briefing = context_gen.generate(
             source, args.repo,
             witness_db=witness_db if witness_db.exists() else None,
             finding_line=finding.line,
         )
-        print(f"  [1/3] Briefing ready ({len(briefing)} chars)", flush=True)
+        print(f"{tag} [1/3] Briefing ready ({len(briefing)} chars)", flush=True)
 
-        print(f"  [2/3] Synthesising patch...", flush=True)
+        print(f"{tag} [2/3] Synthesising patch...", flush=True)
         patch = patch_gen.generate(finding, briefing, source)
-        print(f"  [2/3] Patch ready ({len(patch.splitlines())} lines)", flush=True)
+        print(f"{tag} [2/3] Patch ready ({len(patch.splitlines())} lines)", flush=True)
 
-        print(f"  [3/3] Validating patch...", flush=True)
+        print(f"{tag} [3/3] Validating patch...", flush=True)
         val = validator.validate(patch, source, repo_root=args.repo)
         if not val.passed:
-            print(f"  [skip] Validation failed ({val.stage}): {val.detail}", flush=True)
+            print(f"{tag} [skip] Validation failed ({val.stage}): {val.detail}", flush=True)
             continue
-        print(f"  [3/3] Validation passed — running triage ({args.triage_rounds} rounds)", flush=True)
+        print(f"{tag} [3/3] Validation passed — running triage ({args.triage_rounds} rounds)", flush=True)
 
         result = triage.run(finding, patch, source, args.repo, briefing=briefing, rounds=args.triage_rounds)
-        print(f"  [triage] verdict={result.verdict} confidence={result.confidence:.2f} chain={result.chain}", flush=True)
+        print(f"{tag} [triage] verdict={result.verdict} confidence={result.confidence:.2f} chain={result.chain}", flush=True)
 
         if result.verdict == "VALID" and result.confidence >= args.min_confidence:
             entry = {"finding": finding.__dict__, "patch": patch, "triage": result.__dict__, "origin": origin}
             accepted.append(entry)
-            print(f"  [accept] {result.reason}", flush=True)
+            print(f"{tag} [accept] {result.reason}", flush=True)
 
             if _crs is not None:
                 crs_patch_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +82,7 @@ def _process_file_group(
                 patch_file.write_text(patch)
                 _crs.submit("patch", str(patch_file))
         else:
-            print(f"  [reject] {result.reason}", flush=True)
+            print(f"{tag} [reject] {result.reason}", flush=True)
 
     return accepted
 
