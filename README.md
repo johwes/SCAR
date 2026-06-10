@@ -56,10 +56,12 @@ counterexample witness trace. IKOS witness traces are the most valuable input
 here — they give the LLM a proven execution path rather than asking it to
 re-derive reachability from source alone.
 
-**② Patch generation** — synthesises a unified diff patch. Applied first with
-`patch --fuzz=3 -l` (tolerant of context-line drift), then with a Python
-fallback that locates the change block by line number if the standard apply
-fails. Only compilation-clean patches proceed to triage.
+**② Patch generation** — synthesises a unified diff patch. If the patch fails
+compilation or MISRA validation, SCAR automatically retries using structured
+output: the LLM produces a JSON `{reasoning, changes}` object instead of a raw
+diff, and the diff is assembled programmatically from line-level edits — eliminating
+the format and hunk-count errors that most commonly cause the first attempt to fail.
+Only compilation-clean patches proceed to triage.
 
 **③ Skeptical triage** — a Skeptical Reviewer LLM attempts to disprove the
 patch over N rounds (`triage-rounds`, default 3). Each round reads all prior
@@ -89,8 +91,9 @@ an Arbiter LLM reads the full debate and issues a final verdict.
 | `III` | All rounds rejected — patch is almost certainly wrong or introduces a regression |
 
 A finding is accepted only when `verdict=VALID` **and** `confidence ≥ min-confidence`
-(default `0.6`). Patches that compile but fail triage are discarded; the finding
-is still logged so it contributes to diagnostic output.
+(default `0.6`). Patches that fail validation or triage are not applied; both
+categories are recorded in `.scar/scar-rejected.json` with the failure stage
+and reason for post-run inspection.
 
 ## Components
 
@@ -101,7 +104,7 @@ is still logged so it contributes to diagnostic output.
 | `scar/context_gen.py` | Security briefing per file, enriched with grep results and IKOS witness traces |
 | `scar/vuln_scan.py` | LLM-driven vulnerability discovery (nano-analyzer Stage 2) |
 | `scar/scan_cmd.py` | Entry point for the `scar-llm-scan` Tekton task |
-| `scar/patch_gen.py` | Synthesises a unified diff patch via LLM |
+| `scar/patch_gen.py` | Synthesises a unified diff patch via LLM; falls back to JSON-structured output (`generate_structured`) when validation fails |
 | `scar/triage.py` | Multi-round skeptical triage + Arbiter verdict (nano-analyzer Stage 3) |
 | `scar/validator.py` | Enforces MISRA safety rules and verifies compilation via `compile_commands.json` |
 | `scar/grep_tool.py` | Agentic grep — lets the LLM resolve `#define` constants across the repo |

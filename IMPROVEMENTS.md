@@ -23,7 +23,7 @@ The native `uva` checker frequently flags uninitialized states on out-of-bounds 
 ## Medium Effort
 
 ### Parallel repair loop (per-file concurrency)
-The current repair loop is strictly single-threaded and processes each finding sequentially, causing LLM API execution limits to dominate overall pipeline wall-clock time. The safe model for acceleration is to group findings by their absolute `file_path` and process each file-group concurrently using a `ThreadPoolExecutor` worker pool. This preserves unique sibling temp-file naming boundaries (`.scar_tmp_*`) per thread and cuts LLM spending in half by running exactly one `context_gen` call per source file instead of per individual finding.
+*Implemented.* Findings are grouped by resolved file path and processed concurrently via a `ThreadPoolExecutor` (controlled by `--max-workers`, default 4). Findings within the same file still run sequentially so patch-compounding can be added later without restructuring. The remaining step is actually compounding patches within a file group — applying each accepted patch to an in-memory scratchpad before the next finding is processed.
 
 ### Patch dependency tracking & compounding updates
 When multiple distinct vulnerabilities exist in different functions of the same file, independent patches will conflict or step on each other's line hunk coordinates. By building on top of the file-grouped sequential threading layout, the engine should apply each accepted patch to its local disk scratchpad immediately after a successful triage phase, forcing subsequent patch synthesis tasks for that file to evaluate the continuously healed state.
