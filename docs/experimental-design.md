@@ -7,6 +7,52 @@ tool.
 
 ---
 
+## Research Foundations
+
+The ideas in this document are not purely speculative — several align with current
+published research in the 2024–2026 period on hybrid vulnerability detection for C/C++.
+
+**Irrelevant context degrades small model accuracy measurably.** Research on LLM
+reasoning in security contexts has quantified that introducing irrelevant context into
+a prompt can reduce reasoning accuracy below 30% in controlled mathematical settings.
+This is not a vague concern — it is the primary quantitative justification for
+specialized prompts over a universal one, especially on a model with ~3B active
+parameters.
+
+**Under-Constrained Symbolic Execution (UCSE) validates the harness generation loop.**
+SyzSpec (UC Riverside / ACM CCS 2025) demonstrates automated specification generation
+for kernel fuzzers via symbolic pointer reasoning over LLVM IR — starting at a function
+boundary rather than program entry, bypassing path explosion. Applied to Syzkaller
+against Linux 6.10, it found 86 previously unknown zero-day crashes across 11 bug
+classes. The analogous pattern for SCAR is: LLM generates `klee_make_symbolic`
+harnesses for user-space functions → KLEE explores paths → specialist LLM repairs
+what KLEE finds.
+
+**For user-space programs, harness generation is more tractable than for the kernel.**
+SyzSpec solves a hard problem: inferring grammar specifications for stateful,
+asynchronous syscall interfaces from deep kernel IR. User-space C functions have
+cleaner API boundaries. FuzzGen (Google) does the static-analysis version of this for
+library APIs; OSS-Fuzz-gen (Google, 2023–2024) does the LLM version — both generate
+libFuzzer harnesses automatically. For KLEE specifically, a function signature like
+`int parse_field(char **src, Record *out)` is a natural harness target: the LLM
+reads the source, marks the input buffer symbolic, and calls in. This is a simpler
+problem than what SyzSpec solves, not a harder one.
+
+**The neuro-symbolic "honest-negative protocol" validates SCAR's triage architecture.**
+The research consensus is that LLMs must not be given final verification authority —
+they should propose, while a deterministic kernel (Lean 4, Coq, Frama-C, an SMT
+solver) accepts or rejects. SCAR's multi-round triage already embodies this: the
+skeptical reviewer proposes arguments, the arbiter decides. The natural upgrade path
+is inserting Frama-C + E-ACSL between patch generation and triage: LLM synthesizes
+ACSL pre/post-conditions and loop invariants, Frama-C translates them to
+runtime-checked assertions, SeaHorn verifies via Constrained Horn Clauses. Patches
+that pass formal verification skip to a shortened triage (1–2 rounds); those that
+fail formal verification go to full triage. This maps exactly to the Frama-C item
+in IMPROVEMENTS.md and would constitute a "formal verification specialist track" in
+the routing architecture.
+
+---
+
 ## The Core Observation
 
 SCAR's current repair loop is generalist by design: every finding, regardless of
@@ -120,6 +166,15 @@ KLEE uses SMT solving to enumerate all feasible execution paths through a functi
 and generates a concrete `.ktest` input for each path that reaches an error. Unlike
 a fuzzer, it finds exact-boundary bugs (a buffer that only overflows at precisely
 `N+1` bytes) in one pass rather than waiting for random mutation to hit the boundary.
+
+KLEE is a user-space tool — it runs directly on LLVM bitcode compiled from ordinary
+C, not kernel IR. The kernel-equivalent, SyzSpec, had to solve the considerably
+harder problem of inferring grammar specifications for stateful syscall interfaces
+from deep kernel IR. A user-space function like `int parse_field(char **src, Record
+*out)` is a clean, bounded harness target by comparison. The LLM reads the signature
+and surrounding source, marks the input buffer symbolic, and calls in directly —
+no kernel-level pointer tracing required. This makes LLM-generated KLEE harnesses
+for targets like scarnet a tractable near-term step, not a research project.
 
 ### The annotation feedback loop
 
