@@ -641,6 +641,158 @@ scoping rule — were derived entirely from reading actual failure cases. No
 prompt change was made speculatively. This is the difference between prompt
 engineering by intuition and prompt engineering by evidence.
 
+---
+
+## Stage 15 — Rejection visibility and structured output fallback
+
+### Rejection tracking
+
+Until this stage, the pipeline reported how many patches were accepted but was
+silent about what happened to the rest. The submit-results step printed
+`Accepted patches: 12` and then dumped raw JSON. There was no record of which
+findings failed, at which stage, or why.
+
+The `_process_file_group` return type was changed from `list[dict]` to
+`tuple[list[dict], list[dict]]` — accepted and rejected separately. Every
+rejection, whether at validation or triage, now carries `rejected_at` and
+`reason` fields. The rejected list is written to `.scar/scar-rejected.json`
+alongside the existing `scar-results.json`.
+
+The `submit-results` step was rewritten to show both lists in a readable
+format:
+
+```
+============================================================
+  ACCEPTED PATCHES (12)
+============================================================
+  OK  [llm-scan] Missing null-termination @ parse.c:41  conf=1.00
+      The patch correctly guarantees null-termination for the bounded strncpy call
+
+  ...
+
+============================================================
+  REJECTED FINDINGS (7)
+============================================================
+  XX  [llm-scan] Unbounded strcpy @ parse.c:46  stage=triage
+      The patch bounds the copy but fails to guarantee null-termination
+
+  XX  [llm-scan] Unchecked atoi/atol @ parse.c:68  stage=triage
+      Incomplete fix — the FRAG command has four call sites, only two are patched
+```
+
+This surfaces the failure reasons without requiring anyone to dig into the
+traces. A student can read the pipeline log and understand immediately which
+findings need better prompts, which need cross-file context, and which are
+genuinely outside the model's reach.
+
+The Tekton YAML required a careful fix to embed inline Python. A YAML literal
+block scalar (`script: |`) ends as soon as content drops below the block's
+indentation level — which a heredoc body at column 0 does immediately. The
+workaround is `python3 -c "..."` with the Python code indented at the same
+8-space level as the surrounding bash. YAML strips those 8 spaces before the
+step runner sees the script, so Python receives 0-indented module-level code.
+The constraint and its rationale are documented in `docs/extending-the-pipeline.md`.
+
+### Investigating the model's failure modes
+
+With structured rejection reasons readable in the pipeline log, the next
+question was whether the *nature* of the remaining failures could be improved.
+SCAR runs against a 35B Mixture-of-Experts model with 3B active parameters per
+token — comparable in compute to a dense 3B model. The results (12/19 accepted
+at full confidence) are strong for a model of this size. But the pattern in the
+failures was suggestive.
+
+The triage rejections for `parse.c:46` (strcpy) and `parse.c:68` (atoi/atol)
+had the same shape: the model understood the vulnerability correctly but
+produced a patch with a technical flaw — missing null-termination after
+strncpy, or the same local variable declared in each of four hunks. These are
+not context failures. They are failures to reason about the consequences of a
+fix pattern before committing to it.
+
+The hypothesis: if the model reasons explicitly before writing code, it catches
+these consequences itself.
+
+### Structured output as a probe
+
+vLLM and compatible LiteLLM endpoints support `response_format: json_schema` —
+constrained generation that enforces a JSON schema at the token level, not as
+post-hoc filtering. This is more than JSON mode: the finite state machine built
+from the schema prevents the model from emitting any token that could not lead
+to a valid document.
+
+A test script (`scripts/test-structured-patch.sh`) was written to probe this
+without running a full pipeline. It replays the exact prompt from a trace file
+(`2-patch-gen.md`) with `response_format: json_schema` added, requesting:
+
+```json
+{
+  "reasoning": "<step-by-step analysis before any code>",
+  "changes": [
+    { "line": <int>, "old": "<original line>", "new": "<replacement>" }
+  ]
+}
+```
+
+Two known failures were replayed:
+
+**`parse.c:46` (strcpy → strncpy missing NUL).** The original unstructured
+response produced `strncpy` without the null-terminator. The structured
+response chose `snprintf` instead — which is inherently null-terminating — and
+correctly identified both real occurrences at lines 46 and 56. The original run
+hallucinated an occurrence at line 55. The structured reasoning field explicitly
+named the SET and GET/DEL branches before writing any code.
+
+**`parse.c:68` (atoi/atol redeclaration).** The original response declared
+`long val` in each of four hunks — same function scope, C redeclaration error.
+The structured response wrapped each fix in a compound statement
+`{ long v = strtol(...); if (v < 0) return -1; out->frag_id = (size_t)v; }`,
+creating a separate block scope per occurrence. The model discovered this
+solution by reasoning through the scope constraint before committing to the fix
+pattern.
+
+Both failures were corrected. The reasoning field did real work in both cases:
+it forced the model to enumerate all occurrences and reason about variable scope
+before writing code that compiles.
+
+### Structured output as a fallback
+
+Replacing the primary patch generation path with structured output would risk
+degrading the 12 findings that already work — constrained generation can push
+small models into suboptimal local optima when the schema restricts the natural
+token distribution. The safer deployment is a fallback: try the unstructured
+diff first; if validation rejects it, retry once with structured output.
+
+Three changes implement this:
+
+**`llm.chat()`** gained an optional `response_format` parameter, passed
+through to the OpenAI-compatible API unchanged. The rest of the client
+(retries, token counting, tracing) is unaffected.
+
+**`patch_gen.generate_structured()`** sends the same briefing and finding with
+the `json_schema` response format, parses the JSON response, and constructs a
+unified diff using Python's `difflib.unified_diff`. Building the diff
+programmatically from `{line, old, new}` tuples eliminates the entire class of
+diff format errors — wrong hunk counts, bad context lines, incorrect file paths
+— because `difflib` handles all of that from a direct line-by-line comparison.
+The structured trace is written to `2-patch-gen-structured.md` with the
+reasoning field as an extra section, so both attempts are inspectable.
+
+**`__main__._process_file_group()`** retries once after any validation failure:
+
+```
+patch_gen.generate()    → validator.validate()
+    passed  → triage
+    failed  → patch_gen.generate_structured()
+                → validator.validate()
+                    passed  → triage
+                    failed  → reject
+```
+
+The cost is one additional LLM call on the ~15% of findings that fail
+first-pass validation. Based on the run history, that is two to three findings
+per run — precisely the ones the structured approach has demonstrated it can
+fix.
+
 A broader methodology note: the traces showed that triage was not the weak
 link. Without that data, it would have been natural to assume that a 20%
 rejection rate indicated problems with the triage prompts — more rounds, a
@@ -652,7 +804,7 @@ upstream, in synthesis. Evidence from traces pointed to the right place.
 
 ## What the evolution shows
 
-Looking across all fourteen stages, a pattern emerges: **every optimisation was
+Looking across all fifteen stages, a pattern emerges: **every optimisation was
 motivated by observing a real run.**
 
 - The build robustness work (Stage 1) came from watching containers fail.
