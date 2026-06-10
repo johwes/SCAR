@@ -141,54 +141,95 @@ int parse_field(char **src, Record *out) {
 ```'
 fi
 
-# ── Build request payload ─────────────────────────────────────────────────────
-PAYLOAD=$(python3 -c "
-import json, sys
-
-system = sys.argv[1]
-user   = sys.argv[2]
-schema = json.loads(sys.argv[3])
-model  = sys.argv[4]
-
-payload = {
-    'model': model,
-    'temperature': 0.1,
-    'messages': [
-        {'role': 'system', 'content': system},
-        {'role': 'user',   'content': user},
-    ],
-    'response_format': {
-        'type': 'json_schema',
-        'json_schema': {
-            'name':   'patch',
-            'strict': True,
-            'schema': schema,
-        },
-    },
+# ── Helper: send one request, return response or empty string on HTTP error ───
+send_request() {
+    local payload="$1"
+    curl -s \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        "$ENDPOINT"
 }
-print(json.dumps(payload))
-" "$SYSTEM_PROMPT" "$USER_PROMPT" "$SCHEMA" "$MODEL")
 
-# ── Send request ──────────────────────────────────────────────────────────────
-echo "[test] sending request..."
-RESPONSE=$(curl -s \
-    -H "Authorization: Bearer $API_KEY" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD" \
-    "$ENDPOINT")
+has_choices() {
+    python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if 'choices' in d else 1)" 2>/dev/null
+}
 
-# Check for API-level error
-if ! echo "$RESPONSE" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-if 'choices' not in d:
-    print('API error:', d.get('error', d))
-    sys.exit(1)
-" 2>/dev/null; then
-    echo "[test] ERROR — raw response:"
-    echo "$RESPONSE"
+# ── Step 1: verify basic connectivity ────────────────────────────────────────
+echo "[test] step 1/3 — verifying basic connectivity..."
+PING_PAYLOAD=$(python3 -c "
+import json
+print(json.dumps({
+    'model': '$MODEL',
+    'temperature': 0.1,
+    'max_tokens': 10,
+    'messages': [{'role': 'user', 'content': 'Reply with the word OK.'}],
+}))
+")
+PING=$(send_request "$PING_PAYLOAD")
+if ! echo "$PING" | has_choices; then
+    echo "[FAIL] basic request failed — endpoint or model name is wrong"
+    echo "$PING"
     exit 1
 fi
+echo "[test] connectivity OK"
+echo ""
+
+# ── Step 2: try json_schema (full constrained generation) ────────────────────
+echo "[test] step 2/3 — trying response_format: json_schema..."
+PAYLOAD_SCHEMA=$(python3 -c "
+import json, sys
+system = sys.argv[1]; user = sys.argv[2]
+schema = json.loads(sys.argv[3]); model = sys.argv[4]
+print(json.dumps({
+    'model': model, 'temperature': 0.1,
+    'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
+    'response_format': {'type': 'json_schema', 'json_schema': {'name': 'patch', 'strict': True, 'schema': schema}},
+}))
+" "$SYSTEM_PROMPT" "$USER_PROMPT" "$SCHEMA" "$MODEL")
+
+RESPONSE=$(send_request "$PAYLOAD_SCHEMA")
+SCHEMA_MODE="json_schema"
+
+if ! echo "$RESPONSE" | has_choices; then
+    echo "[test] json_schema not supported — falling back to json_object mode"
+    echo ""
+
+    # ── Step 3: fallback to json_object + prompt-level instruction ───────────
+    echo "[test] step 3/3 — trying response_format: json_object..."
+    PAYLOAD_OBJ=$(python3 -c "
+import json, sys
+system = sys.argv[1]; user = sys.argv[2]; model = sys.argv[3]
+# Append schema as instruction since the endpoint won't enforce it
+system_ext = system + '''
+
+You MUST respond with a single JSON object matching exactly this structure:
+{
+  \"reasoning\": \"<string>\",
+  \"changes\": [
+    { \"line\": <integer>, \"old\": \"<string>\", \"new\": \"<string>\" }
+  ]
+}
+No markdown, no explanation outside the JSON object.'''
+print(json.dumps({
+    'model': model, 'temperature': 0.1,
+    'messages': [{'role': 'system', 'content': system_ext}, {'role': 'user', 'content': sys.argv[2]}],
+    'response_format': {'type': 'json_object'},
+}))
+" "$SYSTEM_PROMPT" "$USER_PROMPT" "$MODEL")
+
+    RESPONSE=$(send_request "$PAYLOAD_OBJ")
+    SCHEMA_MODE="json_object (prompt-enforced)"
+
+    if ! echo "$RESPONSE" | has_choices; then
+        echo "[FAIL] json_object mode also failed"
+        echo "$RESPONSE"
+        exit 1
+    fi
+fi
+
+echo "[test] mode used: $SCHEMA_MODE"
+echo ""
 
 # ── Parse and display ─────────────────────────────────────────────────────────
 python3 -c "
