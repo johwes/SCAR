@@ -27,9 +27,14 @@ API_KEY="${LLM_API_KEY:?set LLM_API_KEY}"
 MODEL="${LLM_PATCH_MODEL:-${LLM_MODEL:?set LLM_PATCH_MODEL or LLM_MODEL}}"
 
 TRACE_FILE=""
-if [[ "${1:-}" == "--trace" ]]; then
-    TRACE_FILE="${2:?--trace requires a path argument}"
-fi
+FAILURE_HINT=""
+while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+        --trace)        TRACE_FILE="${2:?--trace requires a path argument}"; shift 2 ;;
+        --failure-hint) FAILURE_HINT="${2:?--failure-hint requires a string}"; shift 2 ;;
+        *) echo "[error] unknown argument: $1"; exit 1 ;;
+    esac
+done
 
 # Normalise endpoint: LLM_BASE_URL includes /v1 (OpenAI client convention),
 # so append only /chat/completions. Strip trailing slash first.
@@ -43,6 +48,9 @@ if [[ -n "$TRACE_FILE" ]]; then
     echo "[test] mode     : trace file: $TRACE_FILE"
 else
     echo "[test] mode     : built-in example"
+fi
+if [[ -n "$FAILURE_HINT" ]]; then
+    echo "[test] hint     : $FAILURE_HINT"
 fi
 echo ""
 
@@ -186,13 +194,22 @@ echo "[test] step 2/3 — trying response_format: json_schema..."
 PAYLOAD_SCHEMA=$(python3 -c "
 import json, sys
 system = sys.argv[1]; user = sys.argv[2]
-schema = json.loads(sys.argv[3]); model = sys.argv[4]
+schema = json.loads(sys.argv[3]); model = sys.argv[4]; hint = sys.argv[5]
+if hint:
+    # Inject failure hint the same way generate_structured() does in patch_gen.py,
+    # prepending it just before the source file block.
+    marker = 'Source file ('
+    idx = user.find(marker)
+    if idx >= 0:
+        user = user[:idx] + f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user[idx:]
+    else:
+        user = f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user
 print(json.dumps({
     'model': model, 'temperature': 0.1,
     'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
     'response_format': {'type': 'json_schema', 'json_schema': {'name': 'patch', 'strict': True, 'schema': schema}},
 }))
-" "$SYSTEM_PROMPT" "$USER_PROMPT" "$SCHEMA" "$MODEL")
+" "$SYSTEM_PROMPT" "$USER_PROMPT" "$SCHEMA" "$MODEL" "$FAILURE_HINT")
 
 RESPONSE=$(send_request "$PAYLOAD_SCHEMA")
 SCHEMA_MODE="json_schema"
@@ -205,7 +222,14 @@ if ! echo "$RESPONSE" | has_choices; then
     echo "[test] step 3/3 — trying response_format: json_object..."
     PAYLOAD_OBJ=$(python3 -c "
 import json, sys
-system = sys.argv[1]; user = sys.argv[2]; model = sys.argv[3]
+system = sys.argv[1]; user = sys.argv[2]; model = sys.argv[3]; hint = sys.argv[4]
+if hint:
+    marker = 'Source file ('
+    idx = user.find(marker)
+    if idx >= 0:
+        user = user[:idx] + f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user[idx:]
+    else:
+        user = f'Previous attempt failed — {hint}. Do not repeat this mistake.\n\n' + user
 # Append schema as instruction since the endpoint won't enforce it
 system_ext = system + '''
 
@@ -219,10 +243,10 @@ You MUST respond with a single JSON object matching exactly this structure:
 No markdown, no explanation outside the JSON object.'''
 print(json.dumps({
     'model': model, 'temperature': 0.1,
-    'messages': [{'role': 'system', 'content': system_ext}, {'role': 'user', 'content': sys.argv[2]}],
+    'messages': [{'role': 'system', 'content': system_ext}, {'role': 'user', 'content': user}],
     'response_format': {'type': 'json_object'},
 }))
-" "$SYSTEM_PROMPT" "$USER_PROMPT" "$MODEL")
+" "$SYSTEM_PROMPT" "$USER_PROMPT" "$MODEL" "$FAILURE_HINT")
 
     RESPONSE=$(send_request "$PAYLOAD_OBJ")
     SCHEMA_MODE="json_object (prompt-enforced)"
