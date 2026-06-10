@@ -39,7 +39,11 @@ ENDPOINT="$ENDPOINT/chat/completions"
 
 echo "[test] endpoint : $ENDPOINT"
 echo "[test] model    : $MODEL"
-echo "[test] mode     : ${TRACE_FILE:+trace file: $TRACE_FILE}${TRACE_FILE:-built-in example}"
+if [[ -n "$TRACE_FILE" ]]; then
+    echo "[test] mode     : trace file: $TRACE_FILE"
+else
+    echo "[test] mode     : built-in example"
+fi
 echo ""
 
 # ── JSON schema for structured output ────────────────────────────────────────
@@ -85,8 +89,10 @@ import sys, re, json
 text = open(sys.argv[1], encoding="utf-8").read()
 
 def extract(label):
-    # Match "## Label\n\n" ... up to the next "---" or end of file
-    pat = rf"## {label}\n\n(.*?)(?=\n---|\Z)"
+    # Section separator is "---\n\n## NextSection" — NOT a bare "---" which
+    # also appears inside unified diffs as "--- a/file". Match only the
+    # sequence that precedes another "## " heading or the end of file.
+    pat = rf"## {label}\n\n(.*?)(?=\n---\n\n##|\Z)"
     m = re.search(pat, text, re.DOTALL)
     return m.group(1).strip() if m else ""
 
