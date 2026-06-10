@@ -7,7 +7,7 @@ Ordered from lowest to highest implementation effort.
 ## Low Hanging Fruit
 
 ### Deduplicate Intra-IKOS findings by file+line
-When multiple native IKOS checkers fire on the exact same line (e.g. `boa` and `uva` both flagging `oob_read.c:7`), the lower-priority check wastes multiple LLM calls generating a redundant patch. We should apply a set-based coordinate filter in `__main__.py` right after loading the SARIF bridge array to keep only the highest-severity finding per unique `(file_path, line)` statement.
+*Implemented.* When multiple native IKOS checkers fire on the exact same line (e.g. `boa` and `uva` both flagging `oob_read.c:7`), `_dedup_ikos()` in `__main__.py` keeps only the highest-severity finding per `(file_path, line)` pair using the priority order `boa > dbz > nullity > dfa > sio > uva`. Dropped duplicates are reported at startup.
 
 ### Pre-expand macros with `clang -E`
 The LLM frequently encounters code statements containing fixed-size allocations like `char buf[MAX_SIZE]` and is forced to issue an agentic `GREP: MAX_SIZE` directive to resolve its value. Running a localized `clang -E` pass before analysis produces concrete integer definitions inline. Passing the macro-expanded source string alongside the original codebase allows the LLM to read the human form while immediately seeing the mathematically resolved constant limits.

@@ -207,6 +207,7 @@ def generate_structured(
     briefing: str,
     source_path: str | Path,
     trace_dir: Path | None = None,
+    failure_hint: str | None = None,
 ) -> str:
     """Fallback patch synthesis using JSON-schema constrained generation.
 
@@ -228,6 +229,7 @@ def generate_structured(
         f"  File: {finding.file_path}:{finding.line}\n"
         f"  Message: {finding.message}\n\n"
         + (f"Occurrence count: {occurrence_note}\n\n" if occurrence_note else "")
+        + (f"Previous attempt failed — {failure_hint}. Do not repeat this mistake.\n\n" if failure_hint else "")
         + f"Source file ({source_path}):\n```c\n{source}\n```"
     )
 

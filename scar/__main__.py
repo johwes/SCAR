@@ -20,6 +20,36 @@ except ImportError:
     _crs = None
 
 
+_IKOS_PRIORITY: dict[str, int] = {
+    "boa": 0, "dbz": 1, "nullity": 2, "dfa": 3, "sio": 4, "uva": 5,
+}
+
+
+def _dedup_ikos(findings: list[Finding]) -> list[Finding]:
+    """Keep the highest-severity finding per (file, line) pair.
+
+    When multiple IKOS checkers flag the same line (e.g. boa + uva on an
+    out-of-bounds read), only the highest-priority one is kept so we don't
+    generate redundant patches for the same location.
+    """
+    best: dict[tuple[str, int], Finding] = {}
+    for f in findings:
+        key = (str(Path(f.file_path).resolve()), f.line)
+        existing = best.get(key)
+        if existing is None or (
+            _IKOS_PRIORITY.get(f.rule_id, 99) < _IKOS_PRIORITY.get(existing.rule_id, 99)
+        ):
+            best[key] = f
+    seen: set[tuple[str, int]] = set()
+    result = []
+    for f in findings:
+        key = (str(Path(f.file_path).resolve()), f.line)
+        if best[key] is f and key not in seen:
+            result.append(f)
+            seen.add(key)
+    return result
+
+
 def _process_file_group(
     findings: list[Finding],
     args: argparse.Namespace,
@@ -82,7 +112,8 @@ def _process_file_group(
             )
             try:
                 patch = patch_gen.generate_structured(
-                    finding, briefing, source, trace_dir=trace_dir
+                    finding, briefing, source, trace_dir=trace_dir,
+                    failure_hint=f"{val.stage}: {val.detail}",
                 )
                 val = validator.validate(patch, source, repo_root=args.repo)
             except Exception as exc:
@@ -155,7 +186,15 @@ def main() -> None:
         ikos_findings = []
         print(f"[scar] IKOS SARIF not found — skipping IKOS findings", flush=True)
     else:
-        ikos_findings = bridge.parse()
+        raw_ikos = bridge.parse()
+        ikos_findings = _dedup_ikos(raw_ikos)
+        dropped = len(raw_ikos) - len(ikos_findings)
+        if dropped:
+            print(
+                f"[scar] {dropped} duplicate IKOS finding(s) dropped "
+                f"(same file+line, lower priority checker)",
+                flush=True,
+            )
         print(f"[scar] {len(ikos_findings)} finding(s) from IKOS", flush=True)
 
     # Build a per-file line index for ±3-line sliding-window deduplication.
