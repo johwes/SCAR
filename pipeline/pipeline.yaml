@@ -40,6 +40,8 @@ spec:
           value: $(params.repo-url)
         - name: REVISION
           value: $(params.revision)
+        - name: DELETE_EXISTING
+          value: "true"
 
     - name: build-bitcode
       taskRef:
