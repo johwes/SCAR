@@ -275,8 +275,11 @@ print()
 all_new = ' '.join(c['new'] for c in content.get('changes', []))
 checks = [
     ('no strcpy in fix',    'strcpy'  not in all_new),
-    ('strncpy present',     'strncpy' in all_new or 'memcpy' in all_new or 'snprintf' in all_new),
-    ('null-terminates',     \"= '\\\\0'\" in all_new or '\\\\\\\\0' in all_new or ('sizeof' in all_new and 'strncpy' in all_new and len(content.get('changes',[])) > 1)),
+    ('safe copy used',      any(fn in all_new for fn in ('strncpy', 'snprintf', 'memcpy'))),
+    # snprintf is inherently null-terminating; strncpy needs an explicit '\0'
+    ('null-terminates',     'snprintf' in all_new
+                            or \"= '\\\\0'\" in all_new
+                            or '[sizeof' in all_new and \"'\\\\0'\" in all_new),
     ('sizeof used',         'sizeof'  in all_new),
     ('has reasoning',       len(content.get('reasoning','')) > 20),
 ]
