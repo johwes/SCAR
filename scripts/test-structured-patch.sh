@@ -124,12 +124,21 @@ PYEOF
         # of the working directory (e.g. running from $home/openshift/ with the
         # repo at $home/openshift/SCAR/).
         REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+        # Use AST parsing to extract the string constant without importing the
+        # module — avoids pulling in openai and other runtime dependencies that
+        # are only installed inside the container, not on the local machine.
         STRUCTURED_PROMPT=$(python3 -c "
-import sys
-sys.path.insert(0, sys.argv[1])
-from scar.patch_gen import STRUCTURED_SYSTEM_PROMPT
-print(STRUCTURED_SYSTEM_PROMPT)
-" "$REPO_ROOT" 2>/dev/null)
+import ast, sys, pathlib
+src = pathlib.Path(sys.argv[1]).joinpath('scar/patch_gen.py').read_text()
+tree = ast.parse(src)
+for node in ast.walk(tree):
+    if isinstance(node, ast.Assign):
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id == 'STRUCTURED_SYSTEM_PROMPT':
+                print(ast.literal_eval(node.value))
+                sys.exit(0)
+sys.exit(1)
+" "$REPO_ROOT" 2>/dev/null) || true
         if [[ -n "$STRUCTURED_PROMPT" ]]; then
             echo "[test] using STRUCTURED_SYSTEM_PROMPT from patch_gen.py (retry simulation)"
             SYSTEM_PROMPT="$STRUCTURED_PROMPT"
