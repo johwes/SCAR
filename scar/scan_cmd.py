@@ -2,25 +2,53 @@
 
 Scans all C files in a repo directory using the LLM vulnerability scanner
 (nano-analyzer Stage 2) and writes results to .scar/findings-llm-scan.json.
+
+Files are scanned concurrently up to --max-workers (default 4). Each file
+is fully independent — no shared mutable state between workers — so
+parallelism here is straightforward I/O concurrency.
 """
 
+import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import context_gen, vuln_scan, llm
 
 
-def main() -> None:
-    if len(sys.argv) < 2:
-        print("usage: python3 -m scar.scan_cmd <repo_dir> [<source_dir>]", file=sys.stderr)
-        sys.exit(1)
+def _scan_one(c_file: Path, repo: Path) -> list[dict]:
+    """Scan a single C file and return normalised finding dicts."""
+    print(f"  [llm-scan] {c_file.name}", flush=True)
+    briefing = context_gen.generate(str(c_file), str(repo))
+    file_findings = vuln_scan.scan(str(c_file), briefing, str(repo))
+    print(f"  [llm-scan] {c_file.name} → {len(file_findings)} finding(s)", flush=True)
+    return [
+        {
+            "rule_id":  lf.title,
+            "severity": lf.severity,
+            "file_path": lf.file_path,
+            "line":     lf.line,
+            "column":   0,
+            "message":  lf.description,
+            "function": lf.function,
+        }
+        for lf in file_findings
+    ]
 
-    repo = Path(sys.argv[1])
-    # Optional second arg scopes the scan to a subdirectory (e.g. source-dir=multifile).
-    # Findings still land in repo/.scar/ so the repair loop finds them regardless.
-    scan_root = Path(sys.argv[2]) if len(sys.argv) > 2 else repo
-    out_path = repo / ".scar" / "findings-llm-scan.json"
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="scar.scan_cmd")
+    parser.add_argument("repo", help="Repository root directory")
+    parser.add_argument("scan_root", nargs="?",
+                        help="Subdirectory to scan (default: repo root)")
+    parser.add_argument("--max-workers", type=int, default=4,
+                        help="Max concurrent file scanners (default: 4)")
+    args = parser.parse_args()
+
+    repo      = Path(args.repo)
+    scan_root = Path(args.scan_root) if args.scan_root else repo
+    out_path  = repo / ".scar" / "findings-llm-scan.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     all_c_files = sorted(scan_root.rglob("*.c"))
@@ -41,12 +69,8 @@ def main() -> None:
                 for e in entries
                 if e.get("file") and e.get("directory")
             }
-            # Files in the CCDB (captures fuzz harnesses bear may have picked up).
             ccdb_filtered = [f for f in all_c_files
                              if str(f.resolve()) in ccdb_files and _is_app_code(f)]
-            # Files NOT in the CCDB that are still application code.
-            # OSS-Fuzz build scripts compile only the fuzz harness, not the server
-            # binary — so main.c has no CCDB entry even though it should be scanned.
             non_ccdb = [f for f in all_c_files
                         if str(f.resolve()) not in ccdb_files and _is_app_code(f)]
             c_files = sorted(set(ccdb_filtered + non_ccdb))
@@ -61,22 +85,19 @@ def main() -> None:
         c_files = [f for f in all_c_files if _is_app_code(f)]
         print(f"[llm-scan] {len(c_files)} C file(s) to scan", flush=True)
 
-    findings = []
-    for c_file in c_files:
-        print(f"  [llm-scan] {c_file.name}", flush=True)
-        briefing = context_gen.generate(str(c_file), str(repo))
-        file_findings = vuln_scan.scan(str(c_file), briefing, str(repo))
-        print(f"    → {len(file_findings)} finding(s)", flush=True)
-        for lf in file_findings:
-            findings.append({
-                "rule_id": lf.title,
-                "severity": lf.severity,
-                "file_path": lf.file_path,
-                "line": lf.line,
-                "column": 0,
-                "message": lf.description,
-                "function": lf.function,
-            })
+    n_workers = min(args.max_workers, len(c_files)) if c_files else 1
+    print(f"[llm-scan] {n_workers} concurrent worker(s)", flush=True)
+
+    findings: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_scan_one, f, repo): f for f in c_files}
+        for future in as_completed(futures):
+            c_file = futures[future]
+            try:
+                findings.extend(future.result())
+            except Exception as exc:
+                print(f"  [llm-scan] error scanning {c_file.name}: {exc}", flush=True)
 
     out_path.write_text(json.dumps(findings, indent=2))
     print(f"[llm-scan] {len(findings)} finding(s) written → {out_path}", flush=True)
