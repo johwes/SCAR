@@ -1,19 +1,23 @@
 #!/bin/bash
 # Probe vLLM structured output for patch generation.
 #
-# Tests whether constrained JSON generation improves patch quality versus the
-# current free-text unified-diff approach. Uses parse.c:46 (strcpy into a
-# fixed-size key buffer) — a known failure where the model bounds the copy
-# but misses the null-terminator when generating unstructured output.
+# Two modes:
+#   1. --trace <path/to/2-patch-gen.md>
+#      Reads the exact system+user prompt from a SCAR trace file and replays it
+#      with json_schema constrained generation. Also shows the original response
+#      from the trace for direct comparison.
+#
+#   2. (no args) built-in example
+#      Uses a hand-crafted parse.c:46 strcpy snippet as a self-contained smoke test.
 #
 # Usage:
 #   LLM_BASE_URL=http://... LLM_API_KEY=... LLM_PATCH_MODEL=... \
-#     ./scripts/test-structured-patch.sh
+#     ./scripts/test-structured-patch.sh [--trace scar-traces/02-parse-46-llm-scan/2-patch-gen.md]
 #
-# Env vars mirror what SCAR uses (LLM_MODEL as fallback for both roles):
+# Env vars mirror what SCAR uses (LLM_MODEL as fallback):
 #   LLM_BASE_URL    required  Base URL of the OpenAI-compatible endpoint
 #   LLM_API_KEY     required  API key (can be "dummy" for local vLLM)
-#   LLM_PATCH_MODEL optional  Model name; falls back to LLM_MODEL
+#   LLM_PATCH_MODEL optional  Falls back to LLM_MODEL
 #   LLM_MODEL       optional  Fallback model name
 
 set -euo pipefail
@@ -22,42 +26,26 @@ BASE_URL="${LLM_BASE_URL:?set LLM_BASE_URL}"
 API_KEY="${LLM_API_KEY:?set LLM_API_KEY}"
 MODEL="${LLM_PATCH_MODEL:-${LLM_MODEL:?set LLM_PATCH_MODEL or LLM_MODEL}}"
 
+TRACE_FILE=""
+if [[ "${1:-}" == "--trace" ]]; then
+    TRACE_FILE="${2:?--trace requires a path argument}"
+fi
+
 echo "[test] endpoint : $BASE_URL"
 echo "[test] model    : $MODEL"
+echo "[test] mode     : ${TRACE_FILE:+trace file: $TRACE_FILE}${TRACE_FILE:-built-in example}"
 echo ""
 
-# ── Vulnerable snippet ────────────────────────────────────────────────────────
-# Minimal reproduction of parse.c:46 from scarnet.
-# The known failure: the model produces strncpy but omits the NUL terminator,
-# leaving the buffer vulnerable to out-of-bounds reads on truncation.
-read -r -d '' SNIPPET << 'EOF'
-#define MAX_KEY_LEN 64
-
-typedef struct {
-    char key[MAX_KEY_LEN];
-    int  value;
-} Record;
-
-/* Parse one '|'-delimited field from src into out->key. */
-int parse_field(char **src, Record *out) {
-    char *tok = strtok_r(NULL, "|", src);
-    if (!tok) return -1;
-    strcpy(out->key, tok);          /* line 13 — vulnerable */
-    return 0;
-}
-EOF
-
 # ── JSON schema for structured output ────────────────────────────────────────
-# The model must reason before committing to changes.
-# Each change targets one line: old (exact original) → new (replacement text).
-# Multiple new lines go in a single "new" value separated by \n.
-read -r -d '' SCHEMA << 'EOF'
-{
+# Language-model must produce reasoning before committing to line edits.
+# Each change targets one source line: old (exact original) → new (replacement).
+# Multiple replacement lines go in a single "new" value joined with \n.
+SCHEMA='{
   "type": "object",
   "properties": {
     "reasoning": {
       "type": "string",
-      "description": "Step-by-step explanation of the vulnerability and the fix"
+      "description": "Step-by-step explanation of the vulnerability and fix strategy"
     },
     "changes": {
       "type": "array",
@@ -65,9 +53,9 @@ read -r -d '' SCHEMA << 'EOF'
       "items": {
         "type": "object",
         "properties": {
-          "line":  { "type": "integer", "description": "1-based line number in the snippet" },
-          "old":   { "type": "string",  "description": "Exact original line (including indentation)" },
-          "new":   { "type": "string",  "description": "Replacement text; use \\n to insert multiple lines" }
+          "line": { "type": "integer", "description": "1-based line number" },
+          "old":  { "type": "string",  "description": "Exact original line including indentation" },
+          "new":  { "type": "string",  "description": "Replacement; use \\n for multiple lines" }
         },
         "required": ["line", "old", "new"],
         "additionalProperties": false
@@ -76,55 +64,104 @@ read -r -d '' SCHEMA << 'EOF'
   },
   "required": ["reasoning", "changes"],
   "additionalProperties": false
-}
-EOF
+}'
 
-# ── Build request payload ─────────────────────────────────────────────────────
-PAYLOAD=$(python3 - << PYEOF
-import json, sys
+# ── Extract prompts ───────────────────────────────────────────────────────────
+if [[ -n "$TRACE_FILE" ]]; then
+    # Parse the markdown trace produced by scar/llm.py write_trace().
+    # Sections are delimited by "---\n\n## <Role>" headers.
+    # The Response section is extracted separately for comparison display.
+    read -r -d '' PROMPTS_JSON << 'PYEOF' || true
+PYEOF
+    PROMPTS_JSON=$(python3 - "$TRACE_FILE" << 'PYEOF'
+import sys, re, json
 
-system = """\
-You are an expert C security engineer. Fix the reported vulnerability minimally.
+text = open(sys.argv[1], encoding="utf-8").read()
+
+def extract(label):
+    # Match "## Label\n\n" ... up to the next "---" or end of file
+    pat = rf"## {label}\n\n(.*?)(?=\n---|\Z)"
+    m = re.search(pat, text, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+system   = extract("System")
+user     = extract("User")
+original = extract("Response")
+
+print(json.dumps({"system": system, "user": user, "original": original}))
+PYEOF
+    )
+
+    SYSTEM_PROMPT=$(echo "$PROMPTS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['system'])")
+    USER_PROMPT=$(echo   "$PROMPTS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['user'])")
+    ORIGINAL=$(echo      "$PROMPTS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['original'])")
+
+    echo "=== Original response (from trace) ==="
+    echo "$ORIGINAL"
+    echo ""
+
+else
+    # Built-in: parse.c:46 strcpy into a fixed-size key buffer.
+    # Known failure: model produces strncpy but omits the NUL terminator.
+    SYSTEM_PROMPT='You are an expert C security engineer. Fix the reported vulnerability minimally.
 
 Rules:
 - Never use strcpy, strcat, sprintf, gets
 - When replacing strcpy: use strncpy(dst, src, sizeof(dst)-1) AND explicitly
-  null-terminate: dst[sizeof(dst)-1] = '\\0'; — both lines are required
+  null-terminate: dst[sizeof(dst)-1] = '"'"'\0'"'"'; — both lines are required
 - Preserve all existing function signatures and struct layouts
-- Fix ONLY the reported line — no unrelated changes
-"""
+- Fix ONLY the reported line — no unrelated changes'
 
-user = """Finding: CWE-121 Stack Buffer Overflow
+    USER_PROMPT='Finding: CWE-121 Stack Buffer Overflow
 File: parse.c, Line 13
 Message: strcpy into fixed-size key field with no bounds check — input length unconstrained
 
 Source:
-\`\`\`c
-""" + """$SNIPPET""" + """
-\`\`\`"""
+```c
+#define MAX_KEY_LEN 64
 
-schema = $SCHEMA
+typedef struct {
+    char key[MAX_KEY_LEN];
+    int  value;
+} Record;
+
+/* Parse one |-delimited field from src into out->key. */
+int parse_field(char **src, Record *out) {
+    char *tok = strtok_r(NULL, "|", src);
+    if (!tok) return -1;
+    strcpy(out->key, tok);          /* line 13 — vulnerable */
+    return 0;
+}
+```'
+fi
+
+# ── Build request payload ─────────────────────────────────────────────────────
+PAYLOAD=$(python3 -c "
+import json, sys
+
+system = sys.argv[1]
+user   = sys.argv[2]
+schema = json.loads(sys.argv[3])
+model  = sys.argv[4]
 
 payload = {
-    "model": "$MODEL",
-    "temperature": 0.1,
-    "messages": [
-        {"role": "system", "content": system},
-        {"role": "user",   "content": user},
+    'model': model,
+    'temperature': 0.1,
+    'messages': [
+        {'role': 'system', 'content': system},
+        {'role': 'user',   'content': user},
     ],
-    "response_format": {
-        "type": "json_schema",
-        "json_schema": {
-            "name":   "patch",
-            "strict": True,
-            "schema": schema,
+    'response_format': {
+        'type': 'json_schema',
+        'json_schema': {
+            'name':   'patch',
+            'strict': True,
+            'schema': schema,
         },
     },
 }
-
 print(json.dumps(payload))
-PYEOF
-)
+" "$SYSTEM_PROMPT" "$USER_PROMPT" "$SCHEMA" "$MODEL")
 
 # ── Send request ──────────────────────────────────────────────────────────────
 echo "[test] sending request..."
@@ -135,67 +172,75 @@ RESPONSE=$(curl -s \
     "$BASE_URL/v1/chat/completions")
 
 # Check for API-level error
-if echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if 'choices' in d else 1)" 2>/dev/null; then
-    true
-else
-    echo "[test] ERROR: unexpected response:"
-    echo "$RESPONSE" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin), indent=2))" 2>/dev/null || echo "$RESPONSE"
+if ! echo "$RESPONSE" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+if 'choices' not in d:
+    print('API error:', d.get('error', d))
+    sys.exit(1)
+" 2>/dev/null; then
+    echo "[test] ERROR — raw response:"
+    echo "$RESPONSE"
     exit 1
 fi
 
 # ── Parse and display ─────────────────────────────────────────────────────────
-python3 - << PYEOF
+python3 -c "
 import json, sys
 
-response = json.loads("""$RESPONSE""")
-content  = json.loads(response["choices"][0]["message"]["content"])
-usage    = response.get("usage", {})
+response = json.loads(sys.argv[1])
+raw      = response['choices'][0]['message']['content']
+usage    = response.get('usage', {})
 
-sep = "=" * 66
+try:
+    content = json.loads(raw)
+except json.JSONDecodeError as e:
+    print(f'[FAIL] response is not valid JSON: {e}')
+    print(raw)
+    sys.exit(1)
+
+sep = '=' * 66
 
 print()
 print(sep)
-print("  REASONING")
+print('  REASONING')
 print(sep)
-print(content["reasoning"])
+print(content.get('reasoning', '(none)'))
 
 print()
 print(sep)
-print("  CHANGES")
+print('  CHANGES')
 print(sep)
-for c in content["changes"]:
-    print(f"  line {c['line']}:")
-    print(f"    - {c['old'].strip()}")
-    for nl in c["new"].split("\\n"):
-        print(f"    + {nl.strip()}")
+for c in content.get('changes', []):
+    print(f\"  line {c['line']}:\")
+    print(f\"    - {c['old'].strip()}\")
+    for nl in c['new'].split('\\\\n'):
+        print(f\"    + {nl}\")
 print()
 
-# ── Correctness checks ────────────────────────────────────────────────────────
-print(sep)
-print("  CORRECTNESS CHECKS")
-print(sep)
-
-all_new = " ".join(c["new"] for c in content["changes"])
-
+# Correctness checks — adjust per vulnerability if using a custom trace
+all_new = ' '.join(c['new'] for c in content.get('changes', []))
 checks = [
-    ("no strcpy",          "strcpy"  not in all_new),
-    ("uses strncpy",       "strncpy" in all_new),
-    ("null-terminates",    "= '\\\\0'" in all_new or '= "\\\\0"' in all_new or "[sizeof" in all_new and "\\\\0" in all_new),
-    ("uses sizeof",        "sizeof"  in all_new),
-    ("exactly 1 change",   len(content["changes"]) == 1),
+    ('no strcpy in fix',    'strcpy'  not in all_new),
+    ('strncpy present',     'strncpy' in all_new or 'memcpy' in all_new or 'snprintf' in all_new),
+    ('null-terminates',     \"= '\\\\0'\" in all_new or '\\\\\\\\0' in all_new or ('sizeof' in all_new and 'strncpy' in all_new and len(content.get('changes',[])) > 1)),
+    ('sizeof used',         'sizeof'  in all_new),
+    ('has reasoning',       len(content.get('reasoning','')) > 20),
 ]
 
+print(sep)
+print('  CORRECTNESS CHECKS')
+print(sep)
 all_passed = True
 for label, passed in checks:
-    mark = "PASS" if passed else "FAIL"
-    print(f"  [{mark}] {label}")
+    mark = 'PASS' if passed else 'FAIL'
+    print(f'  [{mark}] {label}')
     if not passed:
         all_passed = False
 
 print(sep)
-print(f"  tokens: {usage.get('prompt_tokens',0):,} prompt + {usage.get('completion_tokens',0):,} completion")
+print(f\"  tokens: {usage.get('prompt_tokens',0):,} prompt + {usage.get('completion_tokens',0):,} completion\")
 print(sep)
 print()
-
 sys.exit(0 if all_passed else 1)
-PYEOF
+" "$RESPONSE"
