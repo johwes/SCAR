@@ -54,6 +54,7 @@ def _process_file_group(
             source, args.repo,
             witness_db=witness_db if witness_db.exists() else None,
             finding_line=finding.line,
+            tag=tag,
         )
         print(f"{tag} [1/3] Briefing ready ({len(briefing)} chars)", flush=True)
 
@@ -68,7 +69,7 @@ def _process_file_group(
             continue
         print(f"{tag} [3/3] Validation passed — running triage ({args.triage_rounds} rounds)", flush=True)
 
-        result = triage.run(finding, patch, source, args.repo, briefing=briefing, rounds=args.triage_rounds)
+        result = triage.run(finding, patch, source, args.repo, briefing=briefing, rounds=args.triage_rounds, tag=tag)
         print(f"{tag} [triage] verdict={result.verdict} confidence={result.confidence:.2f} chain={result.chain}", flush=True)
 
         if result.verdict == "VALID" and result.confidence >= args.min_confidence:

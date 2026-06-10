@@ -19,10 +19,11 @@ from . import context_gen, vuln_scan, llm
 
 def _scan_one(c_file: Path, repo: Path) -> list[dict]:
     """Scan a single C file and return normalised finding dicts."""
-    print(f"  [llm-scan] {c_file.name}", flush=True)
-    briefing = context_gen.generate(str(c_file), str(repo))
+    tag = f"[{c_file.stem}]"
+    print(f"{tag} [llm-scan] starting", flush=True)
+    briefing = context_gen.generate(str(c_file), str(repo), tag=tag)
     file_findings = vuln_scan.scan(str(c_file), briefing, str(repo))
-    print(f"  [llm-scan] {c_file.name} → {len(file_findings)} finding(s)", flush=True)
+    print(f"{tag} [llm-scan] → {len(file_findings)} finding(s)", flush=True)
     return [
         {
             "rule_id":  lf.title,

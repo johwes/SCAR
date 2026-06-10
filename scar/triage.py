@@ -72,9 +72,11 @@ def run(
     *,
     briefing: str = "",
     rounds: int = 5,
+    tag: str = "",
 ) -> TriageResult:
     # Use the pre-truncated briefing rather than the full source file.
     # Falls back to reading the full file only if no briefing was provided.
+    prefix = f"{tag} " if tag else ""
     context_body = briefing if briefing else Path(source_path).read_text(encoding="utf-8", errors="replace")
     prior: list[str] = []
     verdicts: list[str] = []
@@ -87,7 +89,7 @@ def run(
     )
 
     for i in range(rounds):
-        print(f"    [triage round {i+1}/{rounds}] reviewing...", flush=True)
+        print(f"{prefix}[triage round {i+1}/{rounds}] reviewing...", flush=True)
         prior_text = "\n\n---\n".join(prior) if prior else "None yet."
         user_content = (
             f"{base_context}\n\nPrior reasoning:\n{prior_text}"
@@ -109,15 +111,15 @@ def run(
         match = _VERDICT_RE.search(response)
         verdict = match.group(1) if match else "UNCERTAIN"
         verdicts.append(verdict)
-        print(f"    [triage round {i+1}/{rounds}] {verdict}", flush=True)
+        print(f"{prefix}[triage round {i+1}/{rounds}] {verdict}", flush=True)
         # A clear INVALID rarely recovers in later rounds — skip remaining
         # rounds to save tokens; the arbiter still reads all completed reasoning.
         if verdict == "INVALID" and i < rounds - 1:
-            print(f"    [triage] early exit after round {i+1} — INVALID", flush=True)
+            print(f"{prefix}[triage] early exit after round {i+1} — INVALID", flush=True)
             break
 
     # Arbiter round
-    print(f"    [arbiter] issuing final verdict...", flush=True)
+    print(f"{prefix}[arbiter] issuing final verdict...", flush=True)
     arbiter_input = (
         f"{base_context}\n\nAll prior reasoning:\n" + "\n\n---\n".join(prior)
     )

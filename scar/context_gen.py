@@ -93,9 +93,11 @@ def generate(
     repo_dir: str | Path,
     witness_db: Path | None = None,
     finding_line: int | None = None,
+    tag: str = "",
 ) -> str:
     """Return a security briefing for source_path, enriched with grep results
     and (when available) the IKOS counterexample witness trace."""
+    prefix = f"{tag} " if tag else ""
     source = Path(source_path).read_text(encoding="utf-8", errors="replace")
 
     if finding_line is not None:
@@ -103,7 +105,7 @@ def generate(
         full_lines = source.count('\n') + 1
         ctx_lines = context_source.count('\n') + 1
         capped = " [capped]" if ctx_lines >= 300 else ""
-        print(f"  [context_gen] {Path(source_path).name}: {ctx_lines} lines{capped} (full file {full_lines}) around line {finding_line}", flush=True)
+        print(f"{prefix}[context_gen] {Path(source_path).name}: {ctx_lines} lines{capped} (full file {full_lines}) around line {finding_line}", flush=True)
         source_header = f"File: {source_path} (function context around line {finding_line})\n\n"
     else:
         context_source = source
