@@ -802,9 +802,152 @@ upstream, in synthesis. Evidence from traces pointed to the right place.
 
 ---
 
+## Stage 16 — Retry quality and intra-IKOS deduplication
+
+### The question the test script raised
+
+Stage 15 established the two-pass retry structure and validated it with the
+test script. But running the script against the same traces from that earlier
+run exposed two further problems worth fixing.
+
+### Problem 1: the retry was blind
+
+When `generate_structured()` is called after a validation failure, it
+previously received no information about *why* the first attempt failed. The
+validator had already diagnosed the failure — stage (`compile`, `parse`,
+`misra`) and a detail string (`redeclaration of 'val' in same function scope`,
+`diff did not apply`, and so on) — but that information was logged to stdout
+and discarded. The structured retry started from scratch with the same
+briefing and source, unaware that its predecessor had just produced a C
+redeclaration error.
+
+For a small model with limited working memory, the difference between "here is
+the source, fix it" and "here is the source, your last attempt failed because
+of a redeclaration error, fix it" is significant. The validator's failure
+reason is precise machine-readable output. Feeding it into the retry prompt is
+essentially free.
+
+The fix: `generate_structured()` gained a `failure_hint` parameter. At the
+callsite in `_process_file_group`, `f"{val.stage}: {val.detail}"` is passed
+through. The retry always receives the exact diagnosis.
+
+### Problem 2: the hint was in the wrong place
+
+The initial implementation embedded the failure hint inside the user message,
+just before the source file block:
+
+```
+user: [briefing] ... [finding] ... [failure hint] ... [source]
+```
+
+This is suboptimal for two reasons. The hint is sandwiched between large
+blocks where attention from a small model is diluted. And the model receives
+an abstract instruction ("don't redeclare variables") without seeing the
+concrete evidence of what it actually produced.
+
+The better structure is a multi-turn correction loop:
+
+```
+system:     STRUCTURED_SYSTEM_PROMPT
+user:       briefing + finding + source
+assistant:  [the actual diff that failed — four hunks, each with long val]
+user:       "Your patch failed validation — compile: redeclaration of 'val'
+             in same function scope. Generate a corrected structured patch."
+```
+
+The model sees its own output as the assistant turn. The correction message
+arrives in a dedicated turn rather than buried in the first prompt. The model
+must reason about what it produced and why it was wrong, rather than following
+an abstract constraint it has no memory of needing.
+
+`generate_structured()` gained a `previous_patch` parameter alongside
+`failure_hint`. When both are provided — which is always the case in the
+pipeline, since `patch` is in scope at the retry callsite — the four-message
+structure is used. The single-turn path with an embedded hint is retained as a
+fallback for external callers that don't have a previous patch.
+
+### Measured effect
+
+Running the test script with and without the multi-turn approach against the
+`parse.c:68` redeclaration failure:
+
+| Approach | How it fixed scope | Completion tokens |
+|---|---|---|
+| Structured, no hint | Block scoping `{ long v = ... }` | 9,213 |
+| Structured, single-turn hint | Block scoping `{ long val = ... }` | 11,412 |
+| **Structured, multi-turn** | Distinct names `v1`, `v2`, `v3`, `v4` | **5,320** |
+
+All three produced compilable patches. The multi-turn approach produced the
+minimal fix: rename the variable, not restructure with braces. It also used
+the fewest completion tokens — the model did not regenerate from scratch, it
+corrected the specific mistake it could see in the assistant turn.
+
+The single-turn hint produced *more* tokens than no hint at all. The model
+spent more reasoning effort on a constraint it was told about abstractly than
+on a mistake it could see directly.
+
+### Problem 3: duplicate IKOS findings wasted LLM calls
+
+IKOS runs seven checkers simultaneously. Multiple checkers can fire on the
+same source line — `boa` (buffer overflow on array access) and `uva`
+(uninitialized variable) commonly co-fire on out-of-bounds reads, because the
+read is both an overflow and an access of potentially uninitialized memory.
+Both findings were being fed independently into the repair loop, generating
+two separate context briefings, two patches, and up to ten triage rounds for
+the same line. The second patch was always redundant: if the first patch fixed
+the line, the second was patching already-patched code; if the first patch
+failed, the second would fail for the same reason.
+
+The fix is a set-based deduplication pass immediately after `bridge.parse()`.
+A priority table encodes which checker's finding is most useful when multiple
+fire on the same line:
+
+```
+boa > dbz > nullity > dfa > sio > uva
+```
+
+`boa` (array overflow) beats `uva` (uninitialized variable) because the buffer
+overflow finding carries more actionable information for patch synthesis —
+it identifies the exact memory safety violation, while the uninitialized
+variable is a downstream consequence. The deduplication keeps the
+highest-priority finding per `(file, line)` pair and preserves the original
+encounter order.
+
+On a scarnet run where `boa` and `uva` co-fire on two out-of-bounds reads,
+this eliminates two redundant finding-processing cycles — two fewer briefing
+calls, two fewer patch attempts, potentially ten fewer triage rounds.
+
+### The test script as a development tool
+
+These three improvements were developed and validated using
+`scripts/test-structured-patch.sh` against historical trace data, without
+running the full pipeline. The workflow:
+
+1. Identify a rejected finding (no `4-arbiter.md` in its trace directory).
+2. Read `2-patch-gen.md` to see the original failed diff and the exact
+   prompts sent.
+3. Run the test script in `--trace` mode to replay the prompt with structured
+   output, measuring the response without a 20-minute pipeline run.
+4. Add `--failure-hint` to simulate the retry path — the script injects the
+   hint and uses `STRUCTURED_SYSTEM_PROMPT` (not the diff-format prompt from
+   the trace), matching what the real retry sends.
+
+The script extracts `STRUCTURED_SYSTEM_PROMPT` from `scar/patch_gen.py` using
+Python's `ast` module rather than importing the package — avoiding the
+dependency on `openai` and other container-only packages that are not installed
+on a local development machine.
+
+This development loop — identify failure from trace, replay with test script,
+confirm improvement, then implement in the pipeline — is the same methodology
+that produced the occurrence count injection and C scoping rule in Stage 14.
+The traces are the evidence base; the test script is the controlled experiment
+environment.
+
+---
+
 ## What the evolution shows
 
-Looking across all fifteen stages, a pattern emerges: **every optimisation was
+Looking across all sixteen stages, a pattern emerges: **every optimisation was
 motivated by observing a real run.**
 
 - The build robustness work (Stage 1) came from watching containers fail.
