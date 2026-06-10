@@ -237,6 +237,116 @@ the same filesystem — useful if you need a build step before an analysis step.
 
 ---
 
+## Inline Python in a Tekton task step
+
+Tekton task steps have their `script:` field parsed as YAML before the script
+runs. This creates a non-obvious constraint when you want to call Python inline.
+
+### The problem: heredocs break YAML
+
+A YAML **literal block scalar** (`script: |`) collects every line that is
+indented at least as much as the first content line. Once a line appears at a
+*lesser* indentation the YAML parser considers the block finished — and tries to
+parse whatever follows as YAML.
+
+A bash heredoc violates this rule: the body and the closing delimiter must sit
+at column 0, which ends the YAML block scalar before the YAML parser finishes
+reading the script. The result is a parse error:
+
+```
+error converting YAML to JSON: yaml: line N: could not find expected ':'
+```
+
+This is what a broken heredoc looks like inside a task YAML:
+
+```yaml
+    steps:
+      - name: run
+        script: |
+          #!/bin/bash
+          python3 - <<'EOF'    # ← this line is fine (12-space indentation)
+import json                    # ← column 0: YAML ends the block here
+print("hello")                 # ← YAML now tries to parse this as a mapping key
+EOF
+```
+
+### The fix: `python3 -c "..."` with matching indentation
+
+Embed the Python inside a double-quoted bash string. The trick is that **every
+Python line in the YAML file must sit at the same indentation as the rest of the
+bash script** (8 spaces in the SCAR tasks). YAML strips that shared indentation
+before handing the script to the step runner, so Python receives the code at
+0 indentation — exactly where module-level statements must be.
+
+```yaml
+    steps:
+      - name: run
+        image: quay.io/jwesterl/scar-agent:latest
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          WS=$(workspaces.source.path)
+          RESULTS="$WS/.scar/scar-results.json"
+
+          python3 -c "
+          import json, sys
+          from pathlib import Path
+          for p in json.load(open(sys.argv[1])):
+              print(p['finding']['rule_id'])
+          " "$RESULTS"
+```
+
+After YAML strips the 8-space block indentation, the step runner sees:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+WS=$(workspaces.source.path)
+RESULTS="$WS/.scar/scar-results.json"
+
+python3 -c "
+import json, sys
+from pathlib import Path
+for p in json.load(open(sys.argv[1])):
+    print(p['finding']['rule_id'])
+" "$RESULTS"
+```
+
+Python receives the code with 0-space module-level indentation, which is valid.
+
+### Indentation rules to remember
+
+| What you write in the YAML file | What bash/Python sees |
+|---|---|
+| 8-space line (bash module level) | 0 spaces — bash top level |
+| 8-space Python line (inside `-c "..."`) | 0 spaces — Python module level |
+| 12-space Python line (inside a `for`/`if`) | 4 spaces — Python block body |
+| 16-space Python line (nested block) | 8 spaces — Python nested body |
+
+### Rules for the Python code inside `python3 -c "..."`
+
+- **Use single quotes** for all Python string literals — the outer bash string
+  uses double quotes, so a `"` inside would terminate it prematurely.
+- **Pass file paths as arguments** (`sys.argv[1]`) rather than embedding
+  `$SHELL_VAR` inside the Python string. Bash expands `$VAR` inside double
+  quotes, but injecting a path directly can cause issues if the path contains
+  spaces or special characters.
+- **No `f-strings` with `{}`** — bash does not expand them, but curly braces
+  inside a double-quoted string can confuse readers. Use `str(x)` and
+  concatenation, or `'{:.2f}'.format(x)`, instead.
+
+### Validating before applying
+
+Always run a YAML lint pass before `oc apply`:
+
+```bash
+python3 -c "import yaml; yaml.safe_load(open('pipeline/tasks/my-task.yaml').read()); print('OK')"
+```
+
+This catches block-scalar truncation before the task hits the cluster.
+
+---
+
 ## Wiring your task into the pipeline
 
 ### Option A — Use the v3 stub slots (recommended)
