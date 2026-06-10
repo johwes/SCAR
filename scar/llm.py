@@ -49,20 +49,32 @@ def review_model() -> str:
     return os.environ.get("LLM_REVIEW_MODEL") or os.environ["LLM_MODEL"]
 
 
-def chat(messages: list[dict], *, model: str, temperature: float = 0.2) -> str:
+def chat(
+    messages: list[dict],
+    *,
+    model: str,
+    temperature: float = 0.2,
+    response_format: dict | None = None,
+) -> str:
     """Send a chat completion request and return the response text.
 
     Retries up to _MAX_RETRIES times with exponential backoff on transient
     network errors (server disconnect, connection reset, timeout).
+
+    response_format is passed through to the API unchanged when provided
+    (e.g. {"type": "json_schema", "json_schema": {...}} for constrained
+    generation on vLLM / LiteLLM endpoints that support it).
     """
     global _prompt_tokens, _completion_tokens
     last_exc: Exception | None = None
+    extra = {"response_format": response_format} if response_format else {}
     for attempt in range(_MAX_RETRIES):
         try:
             response = _get_client().chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
+                **extra,
             )
             if response.usage:
                 with _lock:

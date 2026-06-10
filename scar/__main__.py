@@ -75,6 +75,20 @@ def _process_file_group(
         print(f"{tag} [3/3] Validating patch...", flush=True)
         val = validator.validate(patch, source, repo_root=args.repo)
         if not val.passed:
+            print(
+                f"{tag} [retry] Validation failed ({val.stage}: {val.detail[:80]}) "
+                f"— retrying with structured output",
+                flush=True,
+            )
+            try:
+                patch = patch_gen.generate_structured(
+                    finding, briefing, source, trace_dir=trace_dir
+                )
+                val = validator.validate(patch, source, repo_root=args.repo)
+            except Exception as exc:
+                print(f"{tag} [retry] Structured fallback error: {exc}", flush=True)
+
+        if not val.passed:
             reason = f"{val.stage}: {val.detail}"
             print(f"{tag} [skip] Validation failed ({reason})", flush=True)
             rejected.append({
