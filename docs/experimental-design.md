@@ -105,6 +105,9 @@ the crash class. A specialist prompt uses *only* what matters for that class.
 [tools in parallel]
        │
        ▼
+ pre-filter-classifier      (rule-id base rates + line context; drops ~30% of findings)
+       │
+       ▼
  classify-findings          (pure logic, no LLM — rule_id / keyword routing)
        │
        ├──► repair-arithmetic   (IKOS boa/sio/dbz)
@@ -118,6 +121,14 @@ the crash class. A specialist prompt uses *only* what matters for that class.
                    ▼
             merge-results ──► submit ──► report
 ```
+
+The **pre-filter classifier** runs before routing. It scores each finding for likely
+validity using rule-id base rates and line-context signals (is the flagged line
+actually reachable? does the IKOS checker have a high false-positive rate for this
+pattern?), and discards findings below a confidence threshold. Static analyzers and
+LLM scans both produce a measurable fraction of findings that fail triage — estimated
+30–35% for low-confidence LLM scan findings. Dropping these before they enter the
+repair loop eliminates one of the largest sources of wasted token budget.
 
 Each specialist track runs in parallel. Each reads only its own findings file from
 the shared workspace. Each has a tighter system prompt and only the context signals
@@ -209,6 +220,36 @@ step. That is the strongest possible input signal for patch generation.
 
 A secondary use: KLEE-generated `.ktest` inputs seed the libFuzzer corpus, giving the
 fuzzer a systematically chosen baseline rather than a random start.
+
+---
+
+## The Crash Track — Diversified Fault Localization
+
+The crash/fuzzer specialist track receives the richest possible input: a concrete crashing input, an ASan stack trace, and the source of the crashing function. But crash sites and root causes are often in different functions. A buffer that was under-allocated in `parse_field()` may not actually overflow until several calls later in `apply_record()` — the crash trace points at `apply_record()`, but the fix belongs in `parse_field()`.
+
+Sending only the crash-site function to the repair LLM produces superficial downstream fixes that patch the symptom but leave the root cause reachable on other inputs.
+
+**The Kumushi pattern** addresses this by generating a *family* of variant inputs around the crashing seed (via targeted mutation), running each through the instrumented binary, and ranking functions by how frequently they appear in crash traces across the family:
+
+```
+crashing input (from fuzzer)
+       │
+       ▼
+mutate-seed           (generate N variant inputs — boundary values, length variants)
+       │
+       ▼
+run-family            (ASan binary; collect crash traces for each variant)
+       │
+       ▼
+rank-by-frequency     (functions appearing in all N traces → root cause candidates)
+       │
+       ▼
+repair-crash          (LLM receives: ranked function list + concrete trace + source)
+```
+
+The function present in every crash trace across the family is almost certainly the root cause; functions appearing in only some traces are crash-path effects, not causes. This is implementable as a post-processing step on the existing fuzzer task output — the mutation and trace collection happen in the same ASan binary environment, with no changes to the repair loop itself.
+
+The output pairs naturally with the KLEE annotation loop: KLEE's `.ktest` inputs seed the mutation family, giving it a systematically diverse baseline rather than a single fuzzer-discovered input.
 
 ---
 
