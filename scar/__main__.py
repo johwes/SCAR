@@ -72,22 +72,28 @@ def main() -> None:
     # The repair loop discovers and deduplicates all of them automatically —
     # no changes needed here when a new tool is added to the pipeline.
     aux_findings: list[Finding] = []
+    aux_origins: dict[int, str] = {}  # id(finding) -> tool name extracted from filename
     scar_dir = Path(args.repo) / ".scar"
     for findings_file in sorted(scar_dir.glob("findings-*.json")):
+        # Extract the tool name from "findings-<tool>.json" so it survives into
+        # the accepted-patch record and is counted correctly by tool_diversity.
+        tool_name = findings_file.stem[len("findings-"):]  # e.g. "fuzzer", "llm-scan"
         try:
             raw = json.loads(findings_file.read_text())
             before = len(aux_findings)
             for item in raw:
                 if _near_ikos(item["file_path"], item["line"]):
                     continue  # IKOS already covers this location (within ±3 lines)
-                aux_findings.append(Finding(
+                f = Finding(
                     rule_id=item["rule_id"],
                     severity=item["severity"],
                     file_path=item["file_path"],
                     line=item["line"],
                     column=item.get("column", 0),
                     message=item["message"],
-                ))
+                )
+                aux_findings.append(f)
+                aux_origins[id(f)] = tool_name
             added = len(aux_findings) - before
             print(f"[scar] {added} finding(s) from {findings_file.name}", flush=True)
         except Exception as exc:
@@ -106,7 +112,7 @@ def main() -> None:
 
     for finding in all_findings:
         source = finding.file_path
-        origin = "ikos" if finding in ikos_findings else "llm"
+        origin = "ikos" if finding in ikos_findings else aux_origins.get(id(finding), "llm")
         print(f"\n[scar] ── {finding.rule_id} @ {source}:{finding.line} [{origin}] ──", flush=True)
         print(f"  {finding.message}", flush=True)
 

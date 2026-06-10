@@ -15,6 +15,13 @@ from pathlib import Path
 _HEAP_ALLOC = re.compile(r"\b(malloc|free|realloc|calloc|alloca)\s*\(")
 _BANNED_STR = re.compile(r"\b(strcpy|strcat|sprintf|vsprintf|gets)\s*\(")
 _UNBOUNDED_LOOP = re.compile(r"\bwhile\s*\(\s*(1|true)\s*\)")
+_LINE_COMMENT = re.compile(r"//[^\n]*")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _strip_c_comments(code: str) -> str:
+    code = _BLOCK_COMMENT.sub("", code)
+    return _LINE_COMMENT.sub("", code)
 
 
 @dataclass
@@ -39,16 +46,21 @@ def _check_safety_rules(patch: str) -> ValidationResult:
     removed_lines = "\n".join(
         line[1:] for line in lines if line.startswith("-") and not line.startswith("---")
     )
+    # Strip comments before applying safety regexes so that explanatory
+    # remarks mentioning banned function names don't trigger false rejections.
+    added_code   = _strip_c_comments(added_lines)
+    removed_code = _strip_c_comments(removed_lines)
+
     # Net-count check: a patch that preserves an existing malloc (removes it in
     # one hunk, adds it back in the same hunk with a surrounding guard) is fine.
     # Only reject if the patch increases the number of heap-allocation calls.
-    added_alloc = len(_HEAP_ALLOC.findall(added_lines))
-    removed_alloc = len(_HEAP_ALLOC.findall(removed_lines))
+    added_alloc = len(_HEAP_ALLOC.findall(added_code))
+    removed_alloc = len(_HEAP_ALLOC.findall(removed_code))
     if added_alloc > removed_alloc:
         return ValidationResult(False, "safety", "Patch introduces dynamic heap allocation")
-    if _BANNED_STR.search(added_lines):
+    if _BANNED_STR.search(added_code):
         return ValidationResult(False, "safety", "Patch introduces MISRA-banned string function")
-    if _UNBOUNDED_LOOP.search(added_lines):
+    if _UNBOUNDED_LOOP.search(added_code):
         return ValidationResult(False, "safety", "Patch introduces unbounded while(1) loop")
     return ValidationResult(True, "safety", "All safety rules passed")
 
