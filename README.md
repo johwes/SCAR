@@ -19,6 +19,8 @@ flowchart TD
         LLM vulnerability scan"]
         osscrs["osscrs-scan
         OSS-CRS external tool"]
+        cppcheck["cppcheck
+        intra-procedural static analysis"]
     end
 
     subgraph rl["repair-loop"]
@@ -35,16 +37,16 @@ flowchart TD
     POST results to dashboard"]
 
     src --> bb
-    bb --> ikos & llm & osscrs
-    ikos & llm & osscrs --> s1
+    bb --> ikos & llm & osscrs & cppcheck
+    ikos & llm & osscrs & cppcheck --> s1
     s3 --> submit
     submit --> report
 ```
 
-`ikos-analyze`, `llm-scan`, and `osscrs-scan` run in parallel after bitcode
-compilation. The repair loop merges all finding sources, deduplicates with a
-±3-line sliding window, and drives each finding through the three-stage LLM
-repair pipeline.
+`ikos-analyze`, `llm-scan`, `osscrs-scan`, and `cppcheck` run in parallel
+after bitcode compilation. The repair loop merges all finding sources,
+deduplicates with a ±3-line sliding window, and drives each finding through
+the three-stage LLM repair pipeline.
 
 ## Repair loop
 
