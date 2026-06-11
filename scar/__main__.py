@@ -208,6 +208,20 @@ def main() -> None:
         norm = str(Path(file_path).resolve())
         return any(abs(line - l) <= radius for l in ikos_map.get(norm, []))
 
+    # Cross-tool deduplication: the first finding at a (file, ±3-line window)
+    # wins; later findings from any tool at the same location are suppressed.
+    # Files are processed in sorted order so cppcheck (alphabetically first)
+    # takes priority over llm-scan findings at the same location.
+    aux_map: dict[str, list[int]] = {}
+
+    def _near_aux(file_path: str, line: int, radius: int = 3) -> bool:
+        norm = str(Path(file_path).resolve())
+        return any(abs(line - l) <= radius for l in aux_map.get(norm, []))
+
+    def _register_aux(file_path: str, line: int) -> None:
+        norm = str(Path(file_path).resolve())
+        aux_map.setdefault(norm, []).append(line)
+
     # ── Auxiliary findings (any task writing .scar/findings-<name>.json) ────
     aux_findings: list[Finding] = []
     aux_origins: dict[int, str] = {}  # id(finding) -> tool name extracted from filename
@@ -218,9 +232,13 @@ def main() -> None:
         try:
             raw = json.loads(findings_file.read_text())
             before = len(aux_findings)
+            suppressed = 0
             for item in raw:
                 if _near_ikos(item["file_path"], item["line"]):
                     continue  # IKOS already covers this location (within ±3 lines)
+                if _near_aux(item["file_path"], item["line"]):
+                    suppressed += 1
+                    continue  # earlier tool already covers this location
                 f = Finding(
                     rule_id=item["rule_id"],
                     severity=item["severity"],
@@ -231,8 +249,10 @@ def main() -> None:
                 )
                 aux_findings.append(f)
                 aux_origins[id(f)] = tool_name
+                _register_aux(item["file_path"], item["line"])
             added = len(aux_findings) - before
-            print(f"[scar] {added} finding(s) from {findings_file.name}", flush=True)
+            note = f" ({suppressed} suppressed — covered by earlier tool)" if suppressed else ""
+            print(f"[scar] {added} finding(s) from {findings_file.name}{note}", flush=True)
         except Exception as exc:
             print(f"[scar] warning: could not load {findings_file.name}: {exc}", flush=True)
 

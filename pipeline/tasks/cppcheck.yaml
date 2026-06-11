@@ -17,15 +17,29 @@ spec:
         #!/bin/bash
         set -euo pipefail
         WS=$(workspaces.source.path)
+        CCDB="$WS/.scar/compile_commands.json"
 
-        # Scan only the source tree, not .scar/ build artifacts.
-        cppcheck \
-          --enable=warning \
-          --xml \
-          --suppress=missingIncludeSystem \
-          -i "$WS/.scar" \
-          "$WS" 2>"$WS/.scar/cppcheck.xml" || true
-        echo "Cppcheck XML written to .scar/cppcheck.xml"
+        if [ -f "$CCDB" ]; then
+          # Scope analysis to exactly the files the build system compiled.
+          # --project consumes the CCDB include paths and defines, giving
+          # cppcheck the same file set and flags the compiler saw.
+          echo "[cppcheck] CCDB found — scoped analysis via compile_commands.json"
+          cppcheck \
+            --enable=warning \
+            --xml \
+            --suppress=missingIncludeSystem \
+            --project="$CCDB" \
+            2>"$WS/.scar/cppcheck.xml" || true
+        else
+          echo "[cppcheck] No CCDB — scanning full workspace"
+          cppcheck \
+            --enable=warning \
+            --xml \
+            --suppress=missingIncludeSystem \
+            -i "$WS/.scar" \
+            "$WS" 2>"$WS/.scar/cppcheck.xml" || true
+        fi
+        echo "[cppcheck] XML written to .scar/cppcheck.xml"
 
     - name: convert
       image: quay.io/jwesterl/scar-ikos:latest
@@ -53,6 +67,7 @@ spec:
             out_path.write_text("[]")
             raise SystemExit(0)
 
+        seen = set()
         findings = []
         for error in tree.iterfind(".//error"):
             sev = error.get("severity", "")
@@ -78,6 +93,11 @@ spec:
 
             if not file_path or line == 0:
                 continue
+
+            key = (file_path, line, rule_id)
+            if key in seen:
+                continue
+            seen.add(key)
 
             findings.append({
                 "rule_id":   rule_id,
