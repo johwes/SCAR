@@ -44,6 +44,15 @@ A more precise retrieval strategy (from the PredicateFix line of research) uses 
 ### Pre-filter classifier (false-positive gate)
 Static analyzers and LLM scans both produce findings that fail triage at a measurable rate — estimated 30–35% for low-confidence LLM scan findings. Each rejected finding still consumes the full context-generation and patch-synthesis token budget. A lightweight pre-filter classifier runs between finding ingestion and the repair loop: it scores each finding for likely validity using rule-id base rates and line-context signals, and discards findings below a confidence threshold before they enter the repair loop. This integrates naturally with the specialist routing architecture described in `docs/experimental-design.md` — the classifier gate fires before routing, so only plausible findings reach any specialist track.
 
+### Vulnerability lifecycle registry
+Each finding SCAR processes has a natural lifecycle: NEW → PATCHED, REJECTED, or SUPPRESSED, with the possibility of REOPENED if a patched line regresses. Without tracking this, every pipeline run re-opens findings that have already been accepted and merged, burns triage tokens on known false positives, and produces no audit trail for compliance.
+
+The registry stores a stable finding identity — a hash of `(file_path, rule_id, stripped_line_content)` rather than a raw line number, so it survives minor edits around the vulnerable line — alongside its current state, the patch that resolved it (if any), and timestamps. SQLite is the natural backend: zero infrastructure, single file on the PVC, concurrent-safe reads.
+
+Operationally: before the repair loop starts, each finding is looked up in the registry. SUPPRESSED findings are skipped entirely (saving context-gen and patch-synthesis tokens). PATCHED findings are flagged so triage can verify the fix is still present. New and REOPENED findings proceed normally. After a run, accepted patches advance their finding to PATCHED; triage rejections record a REJECTED entry with the rejection reason.
+
+In an enterprise context this registry connects naturally to ticketing systems (Jira, ServiceNow) and compliance reporting — providing the auditable record of "finding X was detected on date Y, patch Z was generated and reviewed, merged on date W." It also enables **git-diff scoping**: by knowing which findings belong to which files, the registry can skip findings entirely for files that have not changed since their last clean scan, making SCAR practical as a PR gate rather than a full-rescan tool.
+
 ### Serving-layer optimizations (prefix caching, structured output)
 Two serving-layer improvements require no SCAR code changes — only endpoint configuration:
 
