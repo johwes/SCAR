@@ -5,7 +5,7 @@ SCAR pipeline — a fuzzer, a second static analyzer, a custom pattern scanner, 
 anything else that produces vulnerability findings.
 
 It covers the workspace layout, the findings schema, a minimal task skeleton, and
-the exact edits required to `pipeline.yaml`. It does not tell you what to build.
+the exact edits required to `pipeline-v2-full.yaml` or `pipeline-v3-extended.yaml`. It does not tell you what to build.
 
 ---
 
@@ -47,7 +47,7 @@ library.
 
 When you want to *wire a new tool into the pipeline* — point it at the right
 workspace paths, make it write a `findings-<name>.json`, add it to
-`pipeline.yaml` — you work in the task YAML. The Brain does not need to change
+`pipeline-v2-full.yaml` or `pipeline-v3-extended.yaml` — you work in the task YAML. The Brain does not need to change
 at all.
 
 ### The honest exception

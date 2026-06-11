@@ -90,10 +90,18 @@ spec:
         - name: source-dir
           value: $(params.source-dir)
 
+    - name: cppcheck
+      taskRef:
+        name: scar-cppcheck
+      runAfter: [build-bitcode]
+      workspaces:
+        - name: source
+          workspace: shared-data
+
     - name: repair-loop
       taskRef:
         name: scar-repair-loop
-      runAfter: [ikos-analyze, llm-scan, osscrs-scan]
+      runAfter: [ikos-analyze, llm-scan, osscrs-scan, cppcheck]
       workspaces:
         - name: source
           workspace: shared-data

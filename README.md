@@ -285,7 +285,7 @@ The repair loop discovers all `findings-*.json` files automatically — no Pytho
 needed when a new analyzer or fuzzer is added to the pipeline. To add a new tool:
 
 1. Write a Tekton Task that produces `.scar/findings-<name>.json`
-2. Add it to `pipeline.yaml` with `runAfter: [build-bitcode]`
+2. Add it to `pipeline-v2-full.yaml` (or `pipeline-v3-extended.yaml`) with `runAfter: [build-bitcode]`
 3. Add it to the `runAfter` list on `repair-loop`
 
 ## What SCAR does not find

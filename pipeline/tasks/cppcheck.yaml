@@ -1,0 +1,92 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scar-cppcheck
+spec:
+  description: >
+    Run cppcheck static analysis on C source in parallel with IKOS and the LLM
+    scan. Writes .scar/cppcheck.xml then converts it to .scar/findings-cppcheck.json
+    for automatic pickup by the repair loop.
+  workspaces:
+    - name: source
+      description: Shared workspace; reads source tree, writes .scar/findings-cppcheck.json
+  steps:
+    - name: cppcheck
+      image: quay.io/jwesterl/scar-ikos:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        WS=$(workspaces.source.path)
+
+        # Scan only the source tree, not .scar/ build artifacts.
+        cppcheck \
+          --enable=warning \
+          --xml \
+          --suppress=missingIncludeSystem \
+          -i "$WS/.scar" \
+          "$WS" 2>"$WS/.scar/cppcheck.xml" || true
+        echo "Cppcheck XML written to .scar/cppcheck.xml"
+
+    - name: convert
+      image: quay.io/jwesterl/scar-ikos:latest
+      script: |
+        #!/usr/bin/env python3
+        import json, xml.etree.ElementTree as ET
+        from pathlib import Path
+
+        ws       = Path("/workspace/source")
+        xml_path = ws / ".scar" / "cppcheck.xml"
+        out_path = ws / ".scar" / "findings-cppcheck.json"
+
+        KEEP_SEVERITY = {"error", "warning"}
+        SEVERITY_MAP  = {"error": "high", "warning": "medium"}
+
+        if not xml_path.exists():
+            print("[cppcheck-convert] cppcheck.xml not found — skipping")
+            out_path.write_text("[]")
+            raise SystemExit(0)
+
+        try:
+            tree = ET.parse(xml_path)
+        except ET.ParseError as exc:
+            print(f"[cppcheck-convert] XML parse error: {exc} — skipping")
+            out_path.write_text("[]")
+            raise SystemExit(0)
+
+        findings = []
+        for error in tree.iterfind(".//error"):
+            sev = error.get("severity", "")
+            if sev not in KEEP_SEVERITY:
+                continue
+
+            cwe_raw = error.get("cwe", "")
+            rule_id = f"CWE-{cwe_raw}" if cwe_raw else f"cppcheck/{error.get('id', 'unknown')}"
+            msg     = error.get("verbose") or error.get("msg", "")
+
+            loc = error.find("location")
+            if loc is None:
+                continue
+            file_path = loc.get("file", "")
+            try:
+                line = int(loc.get("line", 0))
+            except ValueError:
+                line = 0
+            try:
+                col = int(loc.get("column", 0))
+            except ValueError:
+                col = 0
+
+            if not file_path or line == 0:
+                continue
+
+            findings.append({
+                "rule_id":   rule_id,
+                "severity":  SEVERITY_MAP[sev],
+                "file_path": file_path,
+                "line":      line,
+                "column":    col,
+                "message":   msg,
+            })
+
+        out_path.write_text(json.dumps(findings, indent=2))
+        print(f"[cppcheck-convert] {len(findings)} finding(s) -> {out_path}")
