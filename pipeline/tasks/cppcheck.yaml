@@ -20,33 +20,15 @@ spec:
         CCDB="$WS/.scar/compile_commands.json"
 
         if [ -f "$CCDB" ]; then
-          # Filter out third-party directories before passing to --project so
-          # cppcheck stays within first-party code (same exclusion list as llm-scan).
-          CCDB_FILTERED="$WS/.scar/compile_commands_filtered.json"
-          python3 - <<'PYEOF'
-import json, os, sys
-third_party = {
-    "contrib","third_party","thirdparty","external",
-    "extern","vendor","deps","dependencies",
-}
-src = os.environ["CCDB"]
-dst = os.environ["CCDB_FILTERED"]
-db = json.loads(open(src).read())
-filtered = [
-    e for e in db
-    if not any(
-        seg.lower() in third_party
-        for seg in (e.get("file") or "").replace("\\", "/").split("/")
-    )
-]
-open(dst, "w").write(json.dumps(filtered))
-print(f"[cppcheck] CCDB filtered: {len(db)} → {len(filtered)} entries (excluded third-party)")
-PYEOF
+          # Scope analysis to exactly the files the build system compiled.
+          # --project consumes the CCDB include paths and defines, giving
+          # cppcheck the same file set and flags the compiler saw.
+          echo "[cppcheck] CCDB found — scoped analysis via compile_commands.json"
           cppcheck \
             --enable=warning \
             --xml \
             --suppress=missingIncludeSystem \
-            --project="$CCDB_FILTERED" \
+            --project="$CCDB" \
             2>"$WS/.scar/cppcheck.xml" || true
         else
           echo "[cppcheck] No CCDB — scanning full workspace"

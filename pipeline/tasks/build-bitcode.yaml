@@ -8,6 +8,14 @@ spec:
     - name: source-dir
       description: Path within the workspace containing C source files
       default: "."
+    - name: build-target
+      description: >
+        Make target to build (e.g. "libz.a", "all"). Default is empty, which
+        runs the build system's default target. Pass a specific target to scope
+        the CCDB — and therefore every downstream scanner — to exactly the
+        files that target compiles. This is the correct way to exclude bundled
+        third-party subtrees: build only the library target, not the extras.
+      default: ""
   workspaces:
     - name: source
       description: Shared workspace containing the target C repository
@@ -68,7 +76,7 @@ spec:
           cd "$SRC" && bear_run "OSS-Fuzz build.sh" --output "$CCDB" -- bash build.sh
         elif [ -f "$SRC/Makefile" ]; then
           echo "Detected Makefile — capturing compile commands via bear"
-          cd "$SRC" && bear_run "bear+make" --output "$CCDB" -- make
+          cd "$SRC" && bear_run "bear+make" --output "$CCDB" -- make $(params.build-target)
         else
           echo "No build system detected — validator will use -I parent fallback"
         fi

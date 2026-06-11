@@ -17,6 +17,8 @@ spec:
       default: main
     - name: source-dir
       default: "."
+    - name: build-target
+      default: ""
     - name: triage-rounds
       default: "3"
     - name: min-confidence
@@ -60,6 +62,8 @@ spec:
       params:
         - name: source-dir
           value: $(params.source-dir)
+        - name: build-target
+          value: $(params.build-target)
 
     - name: ikos-analyze
       taskRef:
