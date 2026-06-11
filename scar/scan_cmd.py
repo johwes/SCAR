@@ -54,11 +54,18 @@ def main() -> None:
 
     all_c_files = sorted(scan_root.rglob("*.c"))
 
+    _THIRD_PARTY = frozenset({
+        "contrib", "third_party", "thirdparty", "external",
+        "extern", "vendor", "deps", "dependencies",
+    })
+
     def _is_app_code(f: Path) -> bool:
-        """True for C files that are application code, not fuzz/test scaffolding."""
+        """True for first-party application code (not fuzz scaffolding or third-party)."""
+        parts = {p.lower() for p in f.parts}
         return (
             "fuzz" not in f.name.lower()
             and not any(p in ("test", "tests", "fuzzer", "fuzzers") for p in f.parts)
+            and not (parts & _THIRD_PARTY)
         )
 
     ccdb_path = repo / ".scar" / "compile_commands.json"
