@@ -153,6 +153,13 @@ The `repair-loop` discovers every file matching `.scar/findings-*.json`
 automatically. The `<name>` can be anything — choose something descriptive
 (`findings-afl.json`, `findings-myanalyzer.json`).
 
+**The name must be unique across all parallel tasks.** All analysis tasks
+run concurrently on the same PVC with no file-level locking. If two tasks
+write to the same `findings-<name>.json`, one will silently overwrite the
+other. The built-in tasks use `cppcheck`, `llm-scan`, `osscrs-<timestamp>`,
+`fuzzer`, and `custom-scan` — pick a name that does not collide with any of
+these.
+
 ---
 
 ## The findings schema
