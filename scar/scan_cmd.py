@@ -70,10 +70,22 @@ def main() -> None:
                 for e in entries
                 if e.get("file") and e.get("directory")
             }
+            # Directories that appear in the CCDB — used to include non-CCDB
+            # files that live alongside built files (e.g. a main.c added to
+            # the repo after the build was captured). Files in directories
+            # with no CCDB entries (contrib/, platform-specific subtrees) are
+            # excluded so we don't waste tokens on unrelated code.
+            ccdb_dirs = {
+                str((Path(e["directory"]) / e["file"]).resolve().parent)
+                for e in entries
+                if e.get("file") and e.get("directory")
+            }
             ccdb_filtered = [f for f in all_c_files
                              if str(f.resolve()) in ccdb_files and _is_app_code(f)]
             non_ccdb = [f for f in all_c_files
-                        if str(f.resolve()) not in ccdb_files and _is_app_code(f)]
+                        if str(f.resolve()) not in ccdb_files
+                        and _is_app_code(f)
+                        and str(f.parent.resolve()) in ccdb_dirs]
             c_files = sorted(set(ccdb_filtered + non_ccdb))
             extra_note = f", +{len(non_ccdb)} outside CCDB" if non_ccdb else ""
             print(f"[llm-scan] {len(c_files)} C file(s) to scan "
