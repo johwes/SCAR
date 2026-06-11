@@ -207,6 +207,7 @@ tkn pipeline start scar \
   --param tool-image=quay.io/<your-registry>/scar-my-scanner:latest \
   --param tool-cmd="python3 /opt/my-scanner/my_scanner.py" \
   --workspace name=shared-data,claimName=scar-pvc \
+  --timeout 3h \
   --showlog
 ```
 
@@ -225,6 +226,7 @@ tkn pipeline start scar \
   --param tool-image=ghcr.io/your-org/your-scanner:latest \
   --param tool-cmd="python3 /opt/driver.py --src \$SANDBOX_SRC" \
   --workspace name=shared-data,claimName=scar-pvc \
+  --timeout 3h \
   --showlog
 ```
 

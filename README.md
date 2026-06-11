@@ -221,7 +221,9 @@ tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --param tool-cmd="python3 /app/examples/grep_scan.py" \
   --workspace name=shared-data,claimName=scar-pvc \
-  --use-param-defaults --showlog
+  --use-param-defaults \
+  --timeout 3h \
+  --showlog
 ```
 
 Expected output from the `osscrs-scan` task:
@@ -360,6 +362,7 @@ Detection rate here reflects genuine scanner quality, not label-reading.
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scarnet \
   --workspace name=shared-data,claimName=scar-pvc \
+  --timeout 3h \
   --showlog
 ```
 
@@ -519,32 +522,41 @@ See [Configuration](#configuration) above for the LLM secret, and
 tkn pipeline start scar-v1 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --workspace name=shared-data,claimName=scar-pvc \
+  --timeout 3h \
   --showlog
 
 # v2 — full pipeline, single-file test corpus
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --workspace name=shared-data,claimName=scar-pvc \
-  --use-param-defaults --showlog
+  --use-param-defaults \
+  --timeout 3h \
+  --showlog
 
 # v2 — multi-file OSS-Fuzz example (separate repo)
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-multifile \
   --workspace name=shared-data,claimName=scar-pvc \
-  --use-param-defaults --showlog
+  --use-param-defaults \
+  --timeout 3h \
+  --showlog
 
 # v2 — scarnet test corpus
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scarnet \
   --workspace name=shared-data,claimName=scar-pvc \
-  --use-param-defaults --showlog
+  --use-param-defaults \
+  --timeout 3h \
+  --showlog
 
 # v2 — with the built-in grep_scan example tool (Pattern A, no image rebuild)
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --param tool-cmd="python3 /app/examples/grep_scan.py" \
   --workspace name=shared-data,claimName=scar-pvc \
-  --use-param-defaults --showlog
+  --use-param-defaults \
+  --timeout 3h \
+  --showlog
 
 # v2 — with an external OSS-CRS tool (Pattern B — unmodified upstream image)
 tkn pipeline start scar-v2 \
@@ -552,13 +564,17 @@ tkn pipeline start scar-v2 \
   --param tool-image=ghcr.io/example/osscrs-tool:latest \
   --param tool-cmd="/usr/local/bin/scanner --src \$SANDBOX_SRC" \
   --workspace name=shared-data,claimName=scar-pvc \
-  --use-param-defaults --showlog
+  --use-param-defaults \
+  --timeout 3h \
+  --showlog
 
 # v3 — student extension stubs included
 tkn pipeline start scar-v3 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --workspace name=shared-data,claimName=scar-pvc \
-  --use-param-defaults --showlog
+  --use-param-defaults \
+  --timeout 3h \
+  --showlog
 ```
 
 The `report` task at the end of every variant automatically POSTs results to the

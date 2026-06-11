@@ -453,6 +453,7 @@ oc apply -f pipeline/pipeline-v3-extended.yaml
 tkn pipeline start scar-v3 \
   --param repo-url=<target-repo> \
   --workspace name=shared-data,claimName=scar-pvc \
+  --timeout 3h \
   --showlog
 ```
 
