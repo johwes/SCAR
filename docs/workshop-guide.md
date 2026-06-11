@@ -57,7 +57,7 @@ tkn pipeline start scar-v1 \
   --param triage-rounds=3 \
   --param min-confidence=0.6 \
   --workspace name=shared-data,claimName=scar-pvc \
-  --timeout 3h \
+  --pipeline-timeout 3h \
   --showlog
 ```
 
@@ -87,7 +87,7 @@ tkn pipeline start scar-v2 \
   --param triage-rounds=3 \
   --param min-confidence=0.6 \
   --workspace name=shared-data,claimName=scar-pvc \
-  --timeout 3h \
+  --pipeline-timeout 3h \
   --showlog
 ```
 
@@ -205,7 +205,7 @@ tkn pipeline start scar-v2 \
   --param triage-rounds=3 \
   --param min-confidence=0.6 \
   --workspace name=shared-data,claimName=scar-pvc \
-  --timeout 3h \
+  --pipeline-timeout 3h \
   --showlog
 ```
 
@@ -293,7 +293,7 @@ tkn pipeline start scar-v3 \
   --param triage-rounds=3 \
   --param min-confidence=0.6 \
   --workspace name=shared-data,claimName=scar-pvc \
-  --timeout 3h \
+  --pipeline-timeout 3h \
   --showlog
 ```
 
@@ -381,4 +381,4 @@ origin = fuzzer     — libFuzzer crash (once you wire it in)
 | Patch fails validation | `2-patch-gen.md` in the trace — look at the raw diff |
 | Patch rejected by triage | `4-arbiter.md` in the trace — read the reason |
 | IKOS finds nothing | Check `.scar/sarif/` — are `.sarif` files present and non-empty? |
-| Pipeline times out | Add `--timeout 3h` to the tkn command |
+| Pipeline times out | Add `--pipeline-timeout 3h` to the tkn command |
