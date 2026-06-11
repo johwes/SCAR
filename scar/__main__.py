@@ -103,7 +103,7 @@ def _process_file_group(
         print(f"{tag} [2/3] Patch ready ({len(patch.splitlines())} lines)", flush=True)
 
         print(f"{tag} [3/3] Validating patch...", flush=True)
-        val = validator.validate(patch, source, repo_root=args.repo)
+        val = validator.validate(patch, source, repo_root=args.repo, tag=tag)
         if not val.passed:
             print(
                 f"{tag} [retry] Validation failed ({val.stage}: {val.detail[:80]}) "
@@ -116,7 +116,7 @@ def _process_file_group(
                     failure_hint=f"{val.stage}: {val.detail}",
                     previous_patch=patch,
                 )
-                val = validator.validate(patch, source, repo_root=args.repo)
+                val = validator.validate(patch, source, repo_root=args.repo, tag=tag)
             except Exception as exc:
                 print(f"{tag} [retry] Structured fallback error: {exc}", flush=True)
 

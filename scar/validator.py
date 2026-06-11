@@ -31,11 +31,16 @@ class ValidationResult:
     detail: str
 
 
-def validate(patch: str, source_path: str | Path, repo_root: str | Path | None = None) -> ValidationResult:
+def validate(
+    patch: str,
+    source_path: str | Path,
+    repo_root: str | Path | None = None,
+    tag: str = "[validator]",
+) -> ValidationResult:
     result = _check_safety_rules(patch)
     if not result.passed:
         return result
-    return _check_compilation(patch, Path(source_path), Path(repo_root) if repo_root else None)
+    return _check_compilation(patch, Path(source_path), Path(repo_root) if repo_root else None, tag=tag)
 
 
 def _check_safety_rules(patch: str) -> ValidationResult:
@@ -65,10 +70,10 @@ def _check_safety_rules(patch: str) -> ValidationResult:
     return ValidationResult(True, "safety", "All safety rules passed")
 
 
-def _check_compilation(patch: str, source_path: Path, repo_root: Path | None = None) -> ValidationResult:
+def _check_compilation(patch: str, source_path: Path, repo_root: Path | None = None, tag: str = "[validator]") -> ValidationResult:
     source = source_path.read_text(encoding="utf-8", errors="replace")
 
-    patched = _apply_patch(source, patch, source_path.name)
+    patched = _apply_patch(source, patch, source_path.name, tag=tag)
     if patched is None:
         return ValidationResult(False, "patch_apply", "Unified diff failed to apply cleanly")
 
@@ -134,6 +139,9 @@ def _compile_flags_and_cwd(source_path: Path, repo_root: Path | None) -> tuple[l
                 pass
     fallback_flags = [f"-I{fallback_cwd}"]
     if repo_root:
+        # Always add the repo root itself — many C projects place public headers
+        # directly there (e.g. zlib.h at the root, not under include/).
+        fallback_flags.append(f"-I{repo_root}")
         for inc_name in ("include", "inc"):
             inc_dir = Path(repo_root) / inc_name
             if inc_dir.is_dir():
@@ -141,7 +149,7 @@ def _compile_flags_and_cwd(source_path: Path, repo_root: Path | None) -> tuple[l
     return fallback_flags, fallback_cwd
 
 
-def _apply_patch(source: str, patch: str, filename: str) -> str | None:
+def _apply_patch(source: str, patch: str, filename: str, tag: str = "[validator]") -> str | None:
     """Apply a unified diff, falling back to a context-free Python applier.
 
     Pass 1: standard patch binary with --fuzz=3 -l (tolerates minor context
@@ -172,15 +180,15 @@ def _apply_patch(source: str, patch: str, filename: str) -> str | None:
             )
             if proc.returncode == 0:
                 return out_file.read_text(encoding="utf-8")
-            print(f"[validator] patch binary failed, trying Python applier", flush=True)
+            print(f"{tag} [validator] patch binary failed, trying Python applier", flush=True)
     except Exception:
         pass
 
     # ── Pass 2: context-free Python applier ───────────────────────────────
-    return _apply_patch_python(source, patch)
+    return _apply_patch_python(source, patch, tag=tag)
 
 
-def _apply_patch_python(source: str, patch: str) -> str | None:
+def _apply_patch_python(source: str, patch: str, tag: str = "[validator]") -> str | None:
     """Context-free unified diff applier.
 
     Parses each hunk, ignores context lines, and locates the block of
@@ -236,7 +244,7 @@ def _apply_patch_python(source: str, patch: str) -> str | None:
                     break
             if found_at is None:
                 print(
-                    f"[validator] Python applier: could not locate removed block "
+                    f"{tag} [validator] Python applier: could not locate removed block "
                     f"near line {old_start + 1} — aborting",
                     flush=True,
                 )
