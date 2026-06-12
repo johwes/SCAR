@@ -337,11 +337,9 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
                     struct_stubs.add(t)
                     struct_members[t] = []
 
-            # Undeclared identifier — whitespace-normalised heuristic:
-            #   before_char == "*"  → variable after pointer star → skip
-            #   after starts with "*" and after[1] is alpha/_/* → pointer declarator → type stub
-            #   after starts with alpha (not C keyword) → type stub
-            #   otherwise → int stub (constant / expression variable)
+            # Undeclared identifier — is_type_context heuristic:
+            #   A type name can only appear at statement start or after {, ;, (, ,
+            #   Combined with before_char look-behind to skip variables after *.
             m = _ERR_UNDECL_IDENT.search(line)
             if m:
                 t = m.group(1)
@@ -353,21 +351,19 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
                     if pp >= 0 and cp > pp:
                         off    = cp - pp - 1
                         src_c  = src_l[pp + 1:] if pp < len(src_l) else ""
-                        prefix     = src_c[:off].rstrip()
-                        before_char = prefix[-1] if prefix else ""
-                        after = src_c[off + len(t):].lstrip()
-                        if before_char == "*":
-                            skip_stub = True   # var after *, not a type
-                        elif after.startswith("*"):
-                            # Distinguish pointer declarator (T *var) from multiplication (a * b):
-                            # In "T *var", after[1] is alpha/_ or another *
-                            # In "a * b", after[1] is a space
-                            next_ch = after[1:2]
-                            if next_ch and (next_ch.isalpha() or next_ch == "_" or next_ch == "*"):
+                        prefix = src_c[:off].rstrip()
+                        bef    = prefix[-1] if prefix else ""
+                        aft    = src_c[off + len(t):].lstrip()
+                        is_type_context = (not prefix.strip() or
+                                           prefix.strip()[-1] in "{};(,")
+                        if bef == "*":
+                            skip_stub = True   # var after pointer star, not a type
+                        elif aft.startswith("*"):
+                            if is_type_context:
                                 stub_as_type = True
-                        elif after and after[0].isalpha():
-                            first_word = re.split(r"\W", after)[0]
-                            if first_word not in _C_KEYWORDS:
+                        elif aft and aft[0].isalpha():
+                            fw = re.split(r"\W", aft)[0]
+                            if fw not in _C_KEYWORDS and is_type_context:
                                 stub_as_type = True
 
                     if not skip_stub:
@@ -431,17 +427,22 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
 
             # "member reference ... type 'int' is not a pointer/struct" means
             # a name was stubbed as `static int t = 0` but is actually used
-            # as a pointer to struct (via -> or .). Upgrade it to a padded
-            # struct typedef so member access passes the type check.
+            # with -> or . (it's a struct variable, not a type). Upgrade it:
+            # create a separate _struct_T typedef and keep T as a variable so
+            # that "t.field" and "t->field" remain valid C expressions.
             if _ERR_MEMBER_ON_INT.search(line):
                 src_line = lines[i + 1] if i + 1 < len(lines) else ""
                 for t in list(seen_stubs):
                     int_stub = f"static int {t} = 0;"
                     if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
-                        new_stub = _build_struct_stub(t, [])
-                        preamble = preamble.replace(int_stub, new_stub)
-                        struct_stubs.add(t)
-                        struct_members[t] = []
+                        struct_name  = f"_struct_{t}"
+                        typedef_stub = _build_struct_stub(struct_name, [])
+                        is_ptr       = re.search(r"\b" + re.escape(t) + r"\s*->", src_line)
+                        var_decl     = (f"static {struct_name} *{t} = 0;" if is_ptr
+                                        else f"static {struct_name} {t};")
+                        preamble = preamble.replace(int_stub, typedef_stub + "\n" + var_decl)
+                        struct_stubs.add(struct_name)
+                        struct_members[struct_name] = []
                         int_stubs_upgraded = True
 
             # "no member named 'foo' in 'T'" — if T is one of our padded
@@ -699,15 +700,16 @@ def debug_one(jsonl_path: Path) -> None:
                                     prefix2 = sc2[:off2].rstrip()
                                     bef2    = prefix2[-1] if prefix2 else ""
                                     aft2    = sc2[off2 + len(t):].lstrip()
+                                    is_type_ctx = (not prefix2.strip() or
+                                                   prefix2.strip()[-1] in "{};(,")
                                     if bef2 == "*":
                                         skip2 = True
                                     elif aft2.startswith("*"):
-                                        nch2 = aft2[1:2]
-                                        if nch2 and (nch2.isalpha() or nch2 == "_" or nch2 == "*"):
+                                        if is_type_ctx:
                                             stub_as_type2 = True
                                     elif aft2 and aft2[0].isalpha():
                                         fw2 = re.split(r"\W", aft2)[0]
-                                        if fw2 not in _C_KEYWORDS:
+                                        if fw2 not in _C_KEYWORDS and is_type_ctx:
                                             stub_as_type2 = True
                                 if not skip2:
                                     if stub_as_type2:
@@ -750,11 +752,16 @@ def debug_one(jsonl_path: Path) -> None:
                             for t in list(seen):
                                 int_stub = f"static int {t} = 0;"
                                 if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
-                                    preamble = preamble.replace(int_stub, _build_struct_stub(t, []))
-                                    struct_stubs.add(t)
-                                    struct_members_d[t] = []
+                                    sn       = f"_struct_{t}"
+                                    td_stub  = _build_struct_stub(sn, [])
+                                    is_ptr   = re.search(r"\b" + re.escape(t) + r"\s*->", src_line)
+                                    var_decl = (f"static {sn} *{t} = 0;" if is_ptr
+                                                else f"static {sn} {t};")
+                                    preamble = preamble.replace(int_stub, td_stub + "\n" + var_decl)
+                                    struct_stubs.add(sn)
+                                    struct_members_d[sn] = []
                                     int_upgraded = True
-                                    print(f"  upgrading int stub → struct: {t}")
+                                    print(f"  upgrading int stub → struct var: {t} (type {sn})")
                         m = _ERR_NO_MEMBER.search(err_line)
                         if m:
                             member_name, type_name = m.group(1), m.group(2)
