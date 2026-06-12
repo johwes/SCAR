@@ -17,6 +17,7 @@ import os
 import pickle
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,42 +32,75 @@ DATA    = HERE / "data"
 DEVIGN_ID = "1x6hoF7G-tSYxg8AFybggypLZgMGDNHfF"   # Google Drive file ID
 
 # ---------------------------------------------------------------------------
-# Preamble construction
+# Preamble construction — project header auto-detection via pkg-config
 #
 # The static section covers standard C + common kernel macros + primitive
-# typedefs.  If project dev headers are installed (FFmpeg, LibTIFF, QEMU)
+# typedefs.  If project dev headers are installed (FFmpeg, LibTIFF, GLib)
 # we prepend them so that project-specific types are fully resolved by the
-# real headers rather than our stub injector.  This alone drops attrition
-# on Devign from ~95% to ~40-60%.
+# real headers rather than our stub injector.  This drops attrition on
+# Devign from ~95% to ~40-60%.
+#
+# Detection uses pkg-config — the standard tool C build systems use to
+# locate headers regardless of where they were installed:
+#   pkg-config --exists libavcodec   → is FFmpeg installed?
+#   pkg-config --cflags-only-I libavcodec → -I flags for non-std paths
 #
 # Install on Fedora:   sudo dnf install ffmpeg-free-devel libtiff-devel
 # Install on Ubuntu:   sudo apt install libavcodec-dev libtiff-dev
+# Install on macOS:    brew install ffmpeg libtiff
 # ---------------------------------------------------------------------------
 
-# Project headers to include when present — ordered by impact on Devign.
-# FFmpeg covers ~40% of functions; LibTIFF ~10%; QEMU needs internal
-# headers not shipped in distro packages so we skip it.
-_PROJECT_HEADER_CANDIDATES: list[tuple[str, str]] = [
-    # FFmpeg — avcodec.h pulls avutil, so check all individually
-    ("/usr/include/libavcodec/avcodec.h",   "#include <libavcodec/avcodec.h>"),
-    ("/usr/include/libavutil/avutil.h",     "#include <libavutil/avutil.h>"),
-    ("/usr/include/libavformat/avformat.h", "#include <libavformat/avformat.h>"),
-    ("/usr/include/libavfilter/avfilter.h", "#include <libavfilter/avfilter.h>"),
-    ("/usr/include/libswscale/swscale.h",   "#include <libswscale/swscale.h>"),
-    # LibTIFF
-    ("/usr/include/tiff.h",                 "#include <tiff.h>"),
-    ("/usr/include/tiffio.h",               "#include <tiffio.h>"),
-    # GLib — covers some QEMU utility functions
-    ("/usr/include/glib-2.0/glib.h",        "#include <glib.h>"),
+# pkg-config package name → #include line for the main header.
+_PKG_MAP: list[tuple[str, str]] = [
+    ("libavcodec",  "#include <libavcodec/avcodec.h>"),
+    ("libavutil",   "#include <libavutil/avutil.h>"),
+    ("libavformat", "#include <libavformat/avformat.h>"),
+    ("libavfilter", "#include <libavfilter/avfilter.h>"),
+    ("libswscale",  "#include <libswscale/swscale.h>"),
+    ("libtiff-4",   "#include <tiff.h>"),
+    ("glib-2.0",    "#include <glib.h>"),
 ]
 
-def _detect_project_headers() -> list[str]:
-    """Return include lines for project dev headers found on this system."""
-    return [inc for path, inc in _PROJECT_HEADER_CANDIDATES if Path(path).exists()]
 
+def _detect_project_headers() -> tuple[list[str], list[str]]:
+    """
+    Query pkg-config for each known project library.
+
+    Returns:
+        includes  — #include lines to prepend to the preamble
+        cflags    — extra -I flags (empty on standard Linux; non-empty e.g.
+                    on macOS Homebrew where headers live under /opt/homebrew)
+    """
+    if not shutil.which("pkg-config"):
+        return [], []   # pkg-config absent — skip silently
+
+    includes: list[str] = []
+    cflags_seen: set[str] = set()
+    cflags: list[str] = []
+
+    for pkg, inc in _PKG_MAP:
+        r = subprocess.run(["pkg-config", "--exists", pkg], capture_output=True)
+        if r.returncode != 0:
+            continue
+        includes.append(inc)
+        # --cflags-only-I returns nothing for /usr/include (already on path),
+        # but returns e.g. -I/opt/homebrew/include for Homebrew installs.
+        flags = subprocess.run(
+            ["pkg-config", "--cflags-only-I", pkg],
+            capture_output=True, text=True,
+        ).stdout.split()
+        for flag in flags:
+            if flag not in cflags_seen:
+                cflags_seen.add(flag)
+                cflags.append(flag)
+
+    return includes, cflags
+
+
+# Resolved at import time — safe to use in worker processes.
 # Project headers go BEFORE the __attribute__ suppressor so they compile
-# cleanly, then our macros handle the remaining kernel extensions.
-_PROJECT_INCLUDES = _detect_project_headers()
+# with real attribute support; our macros then handle remaining extensions.
+_PROJECT_INCLUDES, _PROJECT_CFLAGS = _detect_project_headers()
 
 _PREAMBLE_STATIC = """\
 #include <stdio.h>
@@ -219,6 +253,7 @@ def _try_compile(full_source: str) -> tuple[str | None, str]:
         result = subprocess.run(
             ["clang", "-O0", "-S", "-emit-llvm",
              "-Wno-everything", "-ferror-limit=0",
+             *_PROJECT_CFLAGS,              # -I flags for non-std install paths
              "-o", str(ir_path), str(src_path)],
             capture_output=True, timeout=15,
         )
@@ -640,12 +675,24 @@ def main():
         sys.exit(0)
 
     print("\n── Headers ──────────────────────────────────────────────")
-    if _PROJECT_INCLUDES:
+    if not shutil.which("pkg-config"):
+        print("  pkg-config not found — install it to enable project header detection")
+    elif _PROJECT_INCLUDES:
+        found_pkgs  = [pkg for pkg, _ in _PKG_MAP
+                       if any(pkg in inc for inc in _PROJECT_INCLUDES)]
+        missing_pkgs = [pkg for pkg, _ in _PKG_MAP
+                        if not any(pkg in inc for inc in _PROJECT_INCLUDES)]
         for inc in _PROJECT_INCLUDES:
-            print(f"  {inc}")
+            print(f"  ✓ {inc}")
+        if _PROJECT_CFLAGS:
+            print(f"  cflags: {' '.join(_PROJECT_CFLAGS)}")
+        if missing_pkgs:
+            print(f"  ✗ not found: {', '.join(missing_pkgs)}")
+            print("    Fedora:  sudo dnf install ffmpeg-free-devel libtiff-devel")
+            print("    Ubuntu:  sudo apt install libavcodec-dev libtiff-dev")
         print("  → project headers active; expect lower attrition")
     else:
-        print("  No project headers found. To reduce attrition:")
+        print("  No project headers found via pkg-config. To reduce attrition:")
         print("  Fedora:  sudo dnf install ffmpeg-free-devel libtiff-devel")
         print("  Ubuntu:  sudo apt install libavcodec-dev libtiff-dev")
 
