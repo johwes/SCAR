@@ -817,15 +817,22 @@ def process_split(jsonl_path: Path, subset: int | None, workers: int,
     with open(jsonl_path) as f:
         items = [json.loads(l) for l in f]
 
+    rng = random.Random(seed)
     if subset:
         # Random balanced sample so we get a mix of all projects (FFmpeg, QEMU,
         # Linux, LibTIFF) rather than just the first project in the file.
-        rng = random.Random(seed)
         vuln  = [x for x in items if x["target"] == 1]
         fixed = [x for x in items if x["target"] == 0]
         rng.shuffle(vuln)
         rng.shuffle(fixed)
         items = vuln[:subset // 2] + fixed[:subset // 2]
+    else:
+        # Shuffle the full dataset to avoid project-clustering bias: Devign
+        # stores functions in chronological commit order per project, so the
+        # first N items are heavily skewed toward whichever project appears
+        # first in the file.  Shuffling distributes projects evenly across
+        # workers and makes attrition representative of the full dataset.
+        rng.shuffle(items)
 
     graphs, ok, fail = [], 0, 0
     print(f"  Processing {len(items)} functions with {workers} workers ...")
