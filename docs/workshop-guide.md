@@ -45,151 +45,157 @@ kubectl apply -f pipeline/pvc.yaml
 
 ## Part 1 — Guided Learning
 
-### Step 1: Run scar-v1 (LLM-only)
-
-scar-v1 compiles the target to LLVM bitcode, then runs the LLM vulnerability
-scanner. No static analysis. This is the baseline — an LLM reading source code
-and identifying potential bugs without any formal analysis backing it up.
+The instructor has already run scar-v1 and scar-v2 against a known target
+(`scar-test-c`). Pre-generated traces are included in the repo. Extract them
+on your laptop:
 
 ```bash
-tkn pipeline start scar-v1 \
-  --param repo-url=https://github.com/johwes/scar-test-c \
-  --param triage-rounds=3 \
-  --param min-confidence=0.6 \
-  --workspace name=shared-data,claimName=scar-pvc \
-  --pipeline-timeout 3h \
-  --showlog
+tar xf examples/trace-scar-v1-v2-scar-test-c.tar.xz
 ```
 
-While it runs, watch the `[llm-scan]` output. You will see each file being
-scanned and how many findings the LLM reports per file.
-
-When the run finishes, note:
-- How many findings were accepted (the final `[scar] N patch(es) accepted` line)
-- Which files produced findings
-- The total token usage
-
-Keep this number. You will compare it in Step 2.
+This gives you two directories you can inspect locally — no cluster needed.
 
 ---
 
-### Step 2: Run scar-v2 (IKOS + LLM + cppcheck)
-
-scar-v2 adds sound static analysis. IKOS performs whole-program abstract
-interpretation across all linked bitcode modules; cppcheck runs a complementary
-intra-procedural pass. All three scanners run in parallel after the bitcode is
-built. The repair loop merges their findings and deduplicates overlapping
-locations.
+### Step 1: What did scar-v1 find? (LLM-only)
 
 ```bash
-tkn pipeline start scar-v2 \
-  --param repo-url=https://github.com/johwes/scar-test-c \
-  --param triage-rounds=3 \
-  --param min-confidence=0.6 \
-  --workspace name=shared-data,claimName=scar-pvc \
-  --pipeline-timeout 3h \
-  --showlog
+ls trace-scarv1-scar-test-c/
+```
+```
+01-doublefree-8-llm-scan
+02-bof-6-llm-scan
 ```
 
-When the run finishes, compare with Step 1:
-- Did IKOS find bugs the LLM missed? Look for `[origin] = ikos` in the finding
-  list printed at startup.
-- Did cppcheck add anything? Look for `origin = cppcheck`.
-- Did the LLM scan findings change? The same files are scanned — but the
-  briefing now includes IKOS witness information, which changes how the LLM
-  reasons about the code.
+2 findings, both from the LLM scanner. Each directory name encodes:
+`<id>-<bug-type>-<line>-<origin>`
+
+---
+
+### Step 2: What did scar-v2 find? (IKOS + cppcheck + LLM)
+
+```bash
+ls trace-scarv2-scar-test-c/
+```
+```
+01-divzero-5-ikos
+02-doublefree-8-ikos
+03-nullderef-7-ikos
+04-oob_read-7-ikos
+05-signedoverflow-7-ikos
+06-uninit-6-ikos
+07-bof-6-cppcheck
+```
+
+7 findings — 5 from IKOS, 1 from cppcheck, 1 from llm-scan. The LLM scanner
+also ran in v2, but its double-free and bof findings were suppressed: IKOS had
+already flagged those same locations, so the repair loop skipped the duplicates.
 
 **Discussion point:** Sound static analysis is not about finding *more* bugs —
-it is about finding bugs with a *proof*. IKOS's buffer-overflow checker (`boa`)
-does not guess; it proves, via abstract interpretation, that a memory access can
-exceed its allocation. That proof is what makes the finding actionable without
-manual review.
+it is about finding bugs with a *proof*. IKOS's buffer-overflow checker does not
+guess; it proves via abstract interpretation that a code path is reachable and
+dangerous. That proof is what makes a finding actionable without manual review.
 
 ---
 
-### Step 3: Trace Inspection
+### Step 3: Reading a trace
 
-Every finding SCAR processes writes a trace directory under `.scar/traces/` on
-the shared PVC. Each trace contains the full prompts and responses for all three
-LLM stages: context generation, patch synthesis, and triage. Reading a trace is
-the fastest way to understand *why* a specific patch was accepted or rejected.
-
-#### Launch the inspector pod
+Each trace directory is the complete paper trail for one finding — every prompt,
+every model response, every triage round.
 
 ```bash
-kubectl apply -f docs/scar-inspector-pod.yaml
-kubectl wait --for=condition=Ready pod/scar-inspector --timeout=60s
-kubectl exec -it scar-inspector -- bash
+ls trace-scarv2-scar-test-c/02-doublefree-8-ikos/
 ```
-
-#### Inside the pod
-
-```bash
-# List all trace directories — one per finding processed
-ls /workspace/source/.scar/traces/
-
-# Each directory is named: <id>-<stem>-<line>-<origin>
-# Example: 01-parse-46-ikos
-cd /workspace/source/.scar/traces/
-
-# List the stage files for one finding
-ls 01-*/
 ```
-
-Each trace directory contains up to four files:
+1-context-briefing.md  2-patch-gen.md  3-triage-round-1.md
+3-triage-round-2.md    3-triage-round-3.md  4-arbiter.md
+```
 
 | File | Contents |
 |---|---|
-| `1-context-gen.md` | Security briefing: what the LLM was told about the file's architecture |
-| `2-patch-gen.md` | The system + user prompt sent to the patch model, and the raw diff it produced |
-| `2-patch-gen-structured.md` | If the first patch failed validation, the structured-output retry attempt |
-| `3-triage-N.md` | One file per triage round — the judge's reasoning and verdict |
-| `4-arbiter.md` | Final verdict: VALID or INVALID, confidence score, reason |
+| `1-context-briefing.md` | Security briefing generated for the patch model |
+| `2-patch-gen.md` | The patch prompt and the raw diff the model produced |
+| `2-patch-gen-structured.md` | Structured-output retry (only present if first attempt failed) |
+| `3-triage-round-N.md` | One file per triage round — skeptical reviewer reasoning and verdict |
+| `4-arbiter.md` | Final verdict: VALID or INVALID, confidence score, one-sentence reason |
 
-#### Reading an accepted finding
-
-```bash
-# Look at the briefing — what context did the LLM get?
-cat 01-*/1-context-gen.md | head -60
-
-# Look at the patch — what did the model produce?
-cat 01-*/2-patch-gen.md
-
-# Look at the triage rounds — how confident was the judge?
-cat 01-*/3-triage-*.md
-
-# Final verdict
-cat 01-*/4-arbiter.md
-```
-
-#### Reading a rejected finding
-
-Find a trace directory where `4-arbiter.md` shows `INVALID` (or where
-`4-arbiter.md` does not exist — meaning the patch failed validation before
-triage even started):
+The quickest way to understand an outcome is to read `4-arbiter.md` first:
 
 ```bash
-# If 4-arbiter.md is absent, the patch failed the validator.
-# Check the patch that was produced:
-cat 02-*/2-patch-gen.md   # look at the raw diff
-
-# If a structured retry happened:
-cat 02-*/2-patch-gen-structured.md
-
-# If 4-arbiter.md exists but shows INVALID:
-cat 02-*/4-arbiter.md     # read the rejection reason
+tail -4 trace-scarv2-scar-test-c/02-doublefree-8-ikos/4-arbiter.md
+```
+```
+VERDICT: VALID
+CONFIDENCE: 10
+REASON: The patch correctly mitigates the double-free vulnerability by nullifying
+the pointer after the first deallocation, which is the standard and safe C idiom
+to prevent undefined behavior on subsequent frees.
 ```
 
-**Exercise:** Find one accepted and one rejected finding. For each, identify
-the stage where the outcome was determined (context generation, patch synthesis,
-validation, or triage) and write one sentence explaining why.
+Then read backwards — `3-triage-round-*.md` to see how the reviewer challenged
+the patch, `2-patch-gen.md` to see what was produced, `1-context-briefing.md`
+to see what context the model was given.
 
-#### Exit the inspector pod
+---
+
+### Step 4: The same bug, two origins
+
+The double-free bug appears in both runs. Compare the finding message the patch
+model received in each case.
+
+**v1 — LLM scanner** (heuristic, from reading the source):
+```
+Rule:    Double free vulnerability
+Message: Heap pointer `p` is deallocated twice without reinitialization. This
+         corrupts heap metadata and can lead to arbitrary code execution or
+         denial of service if triggered in a production context.
+```
+
+**v2 — IKOS** (proof, from abstract interpretation):
+```
+Rule:    free
+Message: "double free, pointer '(int8_t*)p' points to dynamic memory allocated
+         at 'main:5:21', which is already released"
+```
+
+The LLM inferred the bug. IKOS proved it — it can name the exact allocation
+site (`main:5:21`) because it traced every possible execution path through the
+program. Both produce an accepted patch at confidence 10, but IKOS's finding
+carries a formal proof where the LLM carries a suspicion.
+
+---
+
+### Step 5: A bug only IKOS found — and a rejected patch
+
+`01-divzero-5-ikos` exists in v2 but has no equivalent in v1. The LLM scanner
+never flagged it. IKOS proved that `divide(int a, int b)` can be called with
+`b = 0` and that no guard exists on that path.
+
+Read the verdict:
 
 ```bash
-exit
-kubectl delete pod scar-inspector
+tail -4 trace-scarv2-scar-test-c/01-divzero-5-ikos/4-arbiter.md
 ```
+```
+VERDICT: INVALID
+CONFIDENCE: 10
+REASON: The patch masks the division-by-zero error by returning a value that
+collides with a valid mathematical result, breaking the API contract and enabling
+silent failure propagation downstream.
+```
+
+The model proposed `if (b == 0) return 0;` — which is wrong because `0` is a
+valid result for `divide(0, n)`. The triage reviewer caught it.
+
+**Finding the bug is not the same as fixing it correctly.** The triage stage
+exists precisely for this: a finding with a proof is still only a finding. The
+patch has to hold up to adversarial scrutiny before SCAR will accept it.
+
+**Discussion questions:**
+- Why did the LLM miss divzero in v1 but IKOS found it in v2?
+- What makes IKOS's double-free message more useful to the patch model than the LLM's?
+- The divzero fix returned `0` — what would a correct fix look like? *(The function
+  has no way to signal an error; fixing this properly requires changing the API.)*
 
 ---
 
