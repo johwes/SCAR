@@ -2,7 +2,7 @@
 
 **Code:** `experiments/ir_embed_demo/`  
 **Hypothesis:** `docs/research.md` — Contrastive structural embeddings over LLVM IR  
-**Status:** Initial signal confirmed on toy examples. Real IR and contrastive training not yet tested.
+**Status:** Opcode histogram baseline confirmed. CFG/DFG graph extraction built (`graph_demo.py`). End-to-end GNN PoC working (`gnn_poc.py`). Full training pipeline on Devign ready (`train_gnn/`).
 
 ---
 
@@ -303,66 +303,55 @@ patches to specialise to SCAR's encountered patterns.
 
 ---
 
-### 4b. ProGraML + Devign — structural graph model on LLVM IR
+### 4b. Custom GNN on LLVM IR — structural graph model (no ProGraML)
 
-> **AWS training setup:** see `docs/experiments/ir-embed-aws.md` for
-> instance selection, environment setup, and a cost estimate (~$3–4 total).
-
+> **Step-by-step training guide:** `docs/experiments/ir-embed-training.md`
+> **AWS setup:** `docs/experiments/ir-embed-aws.md`
 
 This is the theoretically correct path for SCAR's use case. It operates
-on the same LLVM IR that SCAR's `build-bitcode` task already produces,
-normalising away all surface noise and capturing actual control and data
-flow structure.
+on LLVM IR, normalising away surface noise and capturing actual control
+and data flow structure.
 
-**The two pieces that already exist:**
+**Why not ProGraML:** the ProGraML library is effectively abandoned (~2022)
+and locks to LLVM 3.8/6.0/10.0 — incompatible with SCAR's LLVM 14
+container. Instead, graph extraction is implemented directly from IR text
+using stdlib Python (`graph_demo.py`), with no external graph library
+required. The same approach was validated as an end-to-end GNN PoC
+(`gnn_poc.py`) and is wired into the full training pipeline (`train_gnn/`).
 
-- **Devign dataset** — same 27,318 labeled C functions as experiment 4a.
-  Available via [CodeXGLUE](https://github.com/microsoft/CodeXGLUE).
+**What is already built:**
 
-- **ProGraML** — open-source CFG/DFG graph pipeline over LLVM IR plus GNN
-  training code. [github.com/ChrisCummins/ProGraML](https://github.com/ChrisCummins/ProGraML).
-  Takes LLVM bitcode as input; emits a graph ready for a message-passing GNN.
+| Script | What it does |
+|---|---|
+| `graph_demo.py` | Parses LLVM IR text → CFG nodes + edges, prints per-pair structural diff |
+| `gnn_poc.py` | End-to-end GNN in pure numpy — validates graph→model pipeline |
+| `train_gnn/preprocess.py` | Downloads Devign, compiles 27K C functions to IR, builds graphs with 11 node features, saves pickled datasets |
+| `train_gnn/train.py` | 2-layer GCNConv → global mean pool → binary classifier, PyTorch Geometric, saves best checkpoint |
 
-**Procedure:**
+**To run on your laptop (CPU, quick sanity check):**
+```bash
+cd experiments/ir_embed_demo/train_gnn
+pip install gdown torch --index-url https://download.pytorch.org/whl/cpu
+pip install torch_geometric
+python preprocess.py --subset 500
+python train.py --epochs 10 --hidden 32
+```
 
-1. Download Devign (same as 4a step 1).
+Any clang version works for preprocessing — no LLVM 14 required.
 
-2. Compile each function to LLVM IR. Many Devign functions reference
-   external headers; compile with `-x c` in permissive mode and discard
-   failures (~20% attrition expected, dataset is large enough to absorb it):
-   ```bash
-   clang -O0 -S -emit-llvm -x c -w -o fn.ll - <<< "$func_source"
-   ```
+**Node features per basic block (11 total):**
+instruction count, out-degree, in-degree, has\_call, has\_store,
+has\_load, has\_icmp, has\_alloca, has\_getelementptr, has\_ret, has\_br.
 
-3. Run ProGraML's `ir2graph` on each `.ll` to produce the CFG/DFG graph.
+**Success criterion:** accuracy ≥ 62% (CodeBERT baseline) on the Devign
+test split confirms the structural graph representation is competitive.
+Accuracy > 69% (UniXcoder) would mean IR structure is earning its cost
+over token-based models.
 
-4. Train ProGraML's GNN classifier on the Devign labels using the existing
-   training loop — no new model code required.
+**SCAR integration (after training):**
 
-5. Evaluate on the held-out test split. Compare accuracy against the 4a
-   token-model baseline to measure what the structural representation buys.
-
-**Infrastructure:** same single-GPU requirement as 4a, but the compile +
-graph-construction preprocessing adds 1–2 hours of CPU work upfront.
-
-**Success criterion:** accuracy ≥ 62% (matching CodeBERT) confirms the
-graph pipeline is working. Accuracy > 69% (beating UniXcoder) would
-indicate the structural representation is earning its extra complexity.
-
-**Why this matters for SCAR specifically:**
-
-SCAR's `build-bitcode` task already emits LLVM bitcode. Once a trained
-model exists, a new `ir-embed-scan` Tekton task can:
-- Run `ir2graph` on each function in the bitcode
-- Score against the model
-- Write top-K findings to `findings-ir-embed.json`
-- Feed into the repair loop alongside IKOS and LLM findings
-
-Zero LLM cost per scan. Fine-tune periodically on accumulated SCAR accepted
-patches to specialise to the patterns SCAR encounters in practice. The
-token-model path (4a) does not have a natural equivalent here — it would
-need to operate on source, not on the bitcode SCAR already produces.
-
-**Recommended order:** run 4a first to validate the dataset and training
-infrastructure cheaply, then attempt 4b. If 4b accuracy does not exceed
-4a, the structural representation is not earning its cost at this scale.
+SCAR's `build-bitcode` task already emits LLVM IR. A new `ir-embed-scan`
+Tekton task would parse each function's IR with `graph_demo.py`'s
+extractor, score it against the trained model, and write top-K findings
+to `findings-ir-embed.json` — feeding into the repair loop alongside IKOS
+and LLM findings. Zero LLM cost per scan.
