@@ -1,0 +1,30 @@
+# Read-only inspector pod for pre-generated workshop traces on scar-workshop-pvc.
+#
+# Mounts the workshop PVC at /workshop. Traces are at:
+#   /workshop/trace-scarv1-scar-test-c/   — scar-v1 run (LLM-only)
+#   /workshop/trace-scarv2-scar-test-c/   — scar-v2 run (IKOS + cppcheck + LLM)
+#
+# Usage:
+#   1. oc apply -f docs/scar-workshop-inspector-pod.yaml
+#   2. oc wait --for=condition=Ready pod/scar-workshop-inspector --timeout=60s
+#   3. oc exec -it scar-workshop-inspector -- bash
+#   4. oc delete pod scar-workshop-inspector   (when done)
+#
+apiVersion: v1
+kind: Pod
+metadata:
+  name: scar-workshop-inspector
+spec:
+  containers:
+    - name: inspector
+      image: registry.access.redhat.com/ubi9:latest
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: workshop
+          mountPath: /workshop
+          readOnly: true
+  volumes:
+    - name: workshop
+      persistentVolumeClaim:
+        claimName: scar-workshop-pvc
+  restartPolicy: Never

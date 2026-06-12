@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scar-workshop-pvc
+spec:
+  accessModes:
+    - ReadWriteMany       # multiple inspector pods read simultaneously
+  resources:
+    requests:
+      storage: 2Gi

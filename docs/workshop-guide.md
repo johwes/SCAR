@@ -14,6 +14,28 @@ live.
 
 ---
 
+## Instructor Setup (run before the workshop)
+
+Load the pre-generated traces onto `scar-workshop-pvc` so students can inspect
+them during Part 1 without waiting for pipeline runs:
+
+```bash
+# From the root of the SCAR repo clone
+./scripts/setup-workshop-pvc.sh
+```
+
+This creates `scar-workshop-pvc`, starts a temporary loader pod, extracts the
+trace archive from `examples/`, and deletes the pod. Takes about 2 minutes.
+Requires ReadWriteMany storage in the namespace (CephFS or NFS).
+
+Then apply the workshop inspector pod so it is ready when students reach Step 3:
+
+```bash
+oc apply -f docs/scar-workshop-inspector-pod.yaml
+```
+
+---
+
 ## Prerequisites
 
 Before the workshop starts, verify you have:
@@ -45,13 +67,21 @@ kubectl apply -f pipeline/pvc.yaml
 
 ## Part 1 — Guided Learning
 
-### Step 1: Run scar-v1 (LLM-only)
+> **Note for students:** Steps 1 and 2 are instructor-led demonstrations.
+> Both pipelines have already been run and the traces are pre-loaded on
+> `scar-workshop-pvc`. Follow along on the projected screen, then proceed
+> to Step 3 for hands-on trace inspection.
+
+---
+
+### Step 1: scar-v1 — LLM-only *(instructor demo)*
 
 scar-v1 compiles the target to LLVM bitcode, then runs the LLM vulnerability
 scanner. No static analysis. This is the baseline — an LLM reading source code
 and identifying potential bugs without any formal analysis backing it up.
 
 ```bash
+# Instructor runs — you do not need to run this
 tkn pipeline start scar-v1 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --param triage-rounds=3 \
@@ -61,19 +91,19 @@ tkn pipeline start scar-v1 \
   --showlog
 ```
 
-While it runs, watch the `[llm-scan]` output. You will see each file being
-scanned and how many findings the LLM reports per file.
-
-When the run finishes, note:
-- How many findings were accepted (the final `[scar] N patch(es) accepted` line)
+While it runs, note:
+- How many findings the LLM reports per file (`[llm-scan]` output)
+- How many findings are accepted (the final `[scar] N patch(es) accepted` line)
 - Which files produced findings
 - The total token usage
 
-Keep this number. You will compare it in Step 2.
+Keep this number — you will compare it against scar-v2.
+
+**scar-v1 result on scar-test-c:** 2 findings (LLM scan only), both accepted.
 
 ---
 
-### Step 2: Run scar-v2 (IKOS + LLM + cppcheck)
+### Step 2: scar-v2 — IKOS + cppcheck + LLM *(instructor demo)*
 
 scar-v2 adds sound static analysis. IKOS performs whole-program abstract
 interpretation across all linked bitcode modules; cppcheck runs a complementary
@@ -82,6 +112,7 @@ built. The repair loop merges their findings and deduplicates overlapping
 locations.
 
 ```bash
+# Instructor runs — you do not need to run this
 tkn pipeline start scar-v2 \
   --param repo-url=https://github.com/johwes/scar-test-c \
   --param triage-rounds=3 \
@@ -91,13 +122,16 @@ tkn pipeline start scar-v2 \
   --showlog
 ```
 
-When the run finishes, compare with Step 1:
+Compare with Step 1:
 - Did IKOS find bugs the LLM missed? Look for `[origin] = ikos` in the finding
   list printed at startup.
 - Did cppcheck add anything? Look for `origin = cppcheck`.
 - Did the LLM scan findings change? The same files are scanned — but the
   briefing now includes IKOS witness information, which changes how the LLM
   reasons about the code.
+
+**scar-v2 result on scar-test-c:** 7 findings — 5 from IKOS, 1 from cppcheck,
+1 from llm-scan. All 7 accepted.
 
 **Discussion point:** Sound static analysis is not about finding *more* bugs —
 it is about finding bugs with a *proof*. IKOS's buffer-overflow checker (`boa`)
@@ -107,88 +141,98 @@ manual review.
 
 ---
 
-### Step 3: Trace Inspection
+### Step 3: Trace Inspection *(hands-on)*
 
-Every finding SCAR processes writes a trace directory under `.scar/traces/` on
-the shared PVC. Each trace contains the full prompts and responses for all three
+Every finding SCAR processes writes a trace directory for each finding it
+processes. Each trace contains the full prompts and responses for all three
 LLM stages: context generation, patch synthesis, and triage. Reading a trace is
 the fastest way to understand *why* a specific patch was accepted or rejected.
 
-#### Launch the inspector pod
+The pre-generated traces for both runs are already loaded on `scar-workshop-pvc`:
+
+```
+/workshop/trace-scarv1-scar-test-c/   — 2 findings (LLM-only)
+/workshop/trace-scarv2-scar-test-c/   — 7 findings (IKOS + cppcheck + LLM)
+```
+
+#### Launch the workshop inspector pod
 
 ```bash
-kubectl apply -f docs/scar-inspector-pod.yaml
-kubectl wait --for=condition=Ready pod/scar-inspector --timeout=60s
-kubectl exec -it scar-inspector -- bash
+oc apply -f docs/scar-workshop-inspector-pod.yaml
+oc wait --for=condition=Ready pod/scar-workshop-inspector --timeout=60s
+oc exec -it scar-workshop-inspector -- bash
 ```
 
 #### Inside the pod
 
 ```bash
-# List all trace directories — one per finding processed
-ls /workspace/source/.scar/traces/
+# Compare what each pipeline version found
+ls /workshop/trace-scarv1-scar-test-c/
+ls /workshop/trace-scarv2-scar-test-c/
 
-# Each directory is named: <id>-<stem>-<line>-<origin>
-# Example: 01-parse-46-ikos
-cd /workspace/source/.scar/traces/
+# Each directory is named: <id>-<bug-type>-<line>-<origin>
+# Origin tells you which tool found it: ikos, cppcheck, or llm-scan
 
-# List the stage files for one finding
-ls 01-*/
+# Inspect traces for one finding — e.g. the IKOS divide-by-zero
+cd /workshop/trace-scarv2-scar-test-c/01-divzero-5-ikos/
+ls
 ```
 
 Each trace directory contains up to four files:
 
 | File | Contents |
 |---|---|
-| `1-context-gen.md` | Security briefing: what the LLM was told about the file's architecture |
+| `1-context-briefing.md` | Security briefing: what the LLM was told about the file's architecture |
 | `2-patch-gen.md` | The system + user prompt sent to the patch model, and the raw diff it produced |
 | `2-patch-gen-structured.md` | If the first patch failed validation, the structured-output retry attempt |
-| `3-triage-N.md` | One file per triage round — the judge's reasoning and verdict |
+| `3-triage-round-N.md` | One file per triage round — the judge's reasoning and verdict |
 | `4-arbiter.md` | Final verdict: VALID or INVALID, confidence score, reason |
 
 #### Reading an accepted finding
 
 ```bash
+cd /workshop/trace-scarv2-scar-test-c/
+
 # Look at the briefing — what context did the LLM get?
-cat 01-*/1-context-gen.md | head -60
+cat 01-divzero-5-ikos/1-context-briefing.md | head -60
 
 # Look at the patch — what did the model produce?
-cat 01-*/2-patch-gen.md
+cat 01-divzero-5-ikos/2-patch-gen.md
 
 # Look at the triage rounds — how confident was the judge?
-cat 01-*/3-triage-*.md
+cat 01-divzero-5-ikos/3-triage-round-*.md
 
 # Final verdict
-cat 01-*/4-arbiter.md
+cat 01-divzero-5-ikos/4-arbiter.md
 ```
 
-#### Reading a rejected finding
+#### Comparing v1 and v2 for the same bug
 
-Find a trace directory where `4-arbiter.md` shows `INVALID` (or where
-`4-arbiter.md` does not exist — meaning the patch failed validation before
-triage even started):
+The double-free bug appears in both runs — found by llm-scan in v1, by IKOS in v2.
+Compare how the briefing and patch differ between the two origins:
 
 ```bash
-# If 4-arbiter.md is absent, the patch failed the validator.
-# Check the patch that was produced:
-cat 02-*/2-patch-gen.md   # look at the raw diff
+# v1 — found by llm-scan
+cat /workshop/trace-scarv1-scar-test-c/01-doublefree-8-llm-scan/1-context-briefing.md | head -40
+cat /workshop/trace-scarv1-scar-test-c/01-doublefree-8-llm-scan/2-patch-gen.md
 
-# If a structured retry happened:
-cat 02-*/2-patch-gen-structured.md
-
-# If 4-arbiter.md exists but shows INVALID:
-cat 02-*/4-arbiter.md     # read the rejection reason
+# v2 — found by IKOS (includes witness trace in briefing)
+cat /workshop/trace-scarv2-scar-test-c/02-doublefree-8-ikos/1-context-briefing.md | head -40
+cat /workshop/trace-scarv2-scar-test-c/02-doublefree-8-ikos/2-patch-gen.md
 ```
 
-**Exercise:** Find one accepted and one rejected finding. For each, identify
-the stage where the outcome was determined (context generation, patch synthesis,
-validation, or triage) and write one sentence explaining why.
+Notice how the IKOS briefing includes a concrete witness trace — IKOS proved the
+double-free path is reachable, which changes what context the patch model receives.
+
+**Exercise:** Find one finding that IKOS found in v2 that was not in v1. Read its
+`1-context-briefing.md` and `4-arbiter.md`. Write one sentence explaining why IKOS
+could find it but the LLM scan alone could not.
 
 #### Exit the inspector pod
 
 ```bash
 exit
-kubectl delete pod scar-inspector
+oc delete pod scar-workshop-inspector
 ```
 
 ---
