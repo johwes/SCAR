@@ -134,13 +134,21 @@ the raw histogram baseline for at least 5 of 7 folds.
 
 ---
 
-### 3. Real-world functions from SCAR accepted patches
+### 3. Real-world functions from SCAR accepted patches on zlib
 
 Goal: test whether the per-pair signal survives when the vulnerable pattern
 is buried in a real function rather than a purpose-built 10-line file.
 
-**Source:** a completed SCAR pipeline run on scarnet or zlib produces
-`.scar/scar-results.json`. Each accepted entry contains:
+Scarnet is synthetic — same code, same patches, same structure every run.
+It tests nothing beyond what the toy examples already cover. The right
+source is **zlib v1.2.11**, which produced 21 accepted patches in a real
+pipeline run. The patched functions (`deflate`, `inflate`, `crc32`, etc.)
+are hundreds of lines of production code; each patch touches a handful of
+lines. That ratio — small vulnerable subgraph, large surrounding context —
+is exactly the stress test this experiment needs.
+
+**Source:** the `scar-results.json` from the zlib v1.2.11 pipeline run.
+Each accepted entry contains:
 - `finding.file_path` — the source file
 - `finding.line` — the vulnerable line
 - `patch` — the unified diff
