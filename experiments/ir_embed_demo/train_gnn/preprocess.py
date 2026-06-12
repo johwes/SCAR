@@ -122,6 +122,7 @@ _ERR_UNKNOWN_TYPE  = re.compile(r"error: unknown type name '(\w+)'")
 _ERR_UNDECL_IDENT  = re.compile(r"error: use of undeclared identifier '(\w+)'")
 _ERR_IMPLICIT_FUNC = re.compile(r"warning: implicit declaration of function '(\w+)'")
 _ERR_INCOMPLETE    = re.compile(r"error: incomplete definition of type '(?:struct|union|enum) (\w+)'")
+_ERR_COMBINE       = re.compile(r"error: cannot combine with previous '(?:type-name|storage class)' declaration specifier")
 
 # ---------------------------------------------------------------------------
 # Step 1 — Download + split Devign
@@ -191,7 +192,7 @@ def _try_compile(full_source: str) -> tuple[str | None, str]:
             ir_path.unlink(missing_ok=True)
 
 
-def compile_to_ir(func_source: str, max_retries: int = 4) -> str | None:
+def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
     """
     Compile one C function string to LLVM IR.
 
@@ -199,9 +200,18 @@ def compile_to_ir(func_source: str, max_retries: int = 4) -> str | None:
     identifiers, injects forward declarations, and retries up to
     max_retries times. Handles the majority of Devign functions that
     use project-specific types (AVCodecContext, kmem_cache, etc.).
+
+    Unknown types are stubbed as padded structs (not void*) so that
+    pointer member access (avctx->field) gets past the type check.
+    If clang then complains that a struct typedef is being used as a
+    storage-class qualifier (e.g. "av_cold int func"), we detect the
+    "cannot combine" error, identify the offending name from context,
+    and replace the struct stub with a no-op macro (#define T).
     """
     preamble = PREAMBLE
     seen_stubs: set[str] = set()
+    # track which names were added as struct stubs so we can demote them
+    struct_stubs: set[str] = set()
 
     for attempt in range(max_retries):
         ir, stderr = _try_compile(preamble + "\n" + func_source)
@@ -209,15 +219,18 @@ def compile_to_ir(func_source: str, max_retries: int = 4) -> str | None:
             return ir
 
         new_stubs: list[str] = []
+        demote_to_macro: set[str] = set()
 
-        for line in stderr.splitlines():
-            # Unknown type name  →  typedef void* TypeName;
+        lines = stderr.splitlines()
+        for i, line in enumerate(lines):
+            # Unknown type name  →  padded struct so member access works
             m = _ERR_UNKNOWN_TYPE.search(line)
             if m:
                 t = m.group(1)
                 if t not in seen_stubs:
-                    new_stubs.append(f"typedef void* {t};")
+                    new_stubs.append(f"typedef struct {{ char _pad[512]; }} {t};")
                     seen_stubs.add(t)
+                    struct_stubs.add(t)
 
             # Undeclared identifier  →  int identifier = 0; (as a global)
             m = _ERR_UNDECL_IDENT.search(line)
@@ -243,6 +256,27 @@ def compile_to_ir(func_source: str, max_retries: int = 4) -> str | None:
                 if stub not in seen_stubs:
                     new_stubs.append(f"struct {t} {{}};")
                     seen_stubs.add(stub)
+
+            # "cannot combine with previous 'type-name'" means a name we
+            # stubbed as a struct type is being used as a qualifier (e.g.
+            # "static av_cold int func").  Find which struct stub appears
+            # on the error source line (reported one line earlier) and
+            # convert it from a struct typedef to a no-op macro.
+            if _ERR_COMBINE.search(line):
+                # clang prints the source line two lines before the caret
+                src_line = lines[i - 2] if i >= 2 else ""
+                for t in list(struct_stubs):
+                    if re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                        demote_to_macro.add(t)
+
+        if demote_to_macro:
+            # Rebuild preamble: replace struct stub with empty macro
+            for t in demote_to_macro:
+                old = f"typedef struct {{ char _pad[512]; }} {t};"
+                preamble = preamble.replace(old, f"#define {t}")
+                struct_stubs.discard(t)
+            # Don't count this as a wasted attempt — loop again
+            continue
 
         if not new_stubs:
             return None   # error type we can't auto-fix
@@ -412,31 +446,65 @@ def debug_one(jsonl_path: Path) -> None:
     with open(jsonl_path) as f:
         for line in f:
             item = json.loads(line)
-            preamble = PREAMBLE
-            seen: set[str] = set()
-            for attempt in range(4):
-                ir, stderr = _try_compile(preamble + "\n" + item["func"])
-                if ir:
-                    print(f"  compiled OK on attempt {attempt+1}")
-                    break
-                print(f"\n--- attempt {attempt+1} stderr ---\n{stderr[:2000]}")
-                new_stubs = []
-                for err_line in stderr.splitlines():
-                    for pat, tmpl in [
-                        (_ERR_UNKNOWN_TYPE,  "typedef void* {t};"),
-                        (_ERR_UNDECL_IDENT,  "static int {t} = 0;"),
-                        (_ERR_IMPLICIT_FUNC, "extern void* {t}();"),
-                    ]:
-                        m = pat.search(err_line)
+            ir = compile_to_ir(item["func"])
+            if ir:
+                print("  compiled OK")
+            else:
+                # Re-run manually to show per-attempt stderr
+                preamble = PREAMBLE
+                seen: set[str] = set()
+                struct_stubs: set[str] = set()
+                for attempt in range(6):
+                    ir2, stderr = _try_compile(preamble + "\n" + item["func"])
+                    if ir2:
+                        print(f"  compiled OK on attempt {attempt+1}")
+                        break
+                    print(f"\n--- attempt {attempt+1} stderr ---\n{stderr[:3000]}")
+                    new_stubs = []
+                    demote: set[str] = set()
+                    src_lines = stderr.splitlines()
+                    for i, err_line in enumerate(src_lines):
+                        m = _ERR_UNKNOWN_TYPE.search(err_line)
                         if m:
                             t = m.group(1)
                             if t not in seen:
-                                new_stubs.append(tmpl.format(t=t))
+                                new_stubs.append(f"typedef struct {{ char _pad[512]; }} {t};")
+                                seen.add(t); struct_stubs.add(t)
+                        m = _ERR_UNDECL_IDENT.search(err_line)
+                        if m:
+                            t = m.group(1)
+                            if t not in seen:
+                                new_stubs.append(f"static int {t} = 0;")
                                 seen.add(t)
-                if not new_stubs:
-                    print("  no fixable errors found — giving up")
-                    break
-                preamble += "\n" + "\n".join(new_stubs)
+                        m = _ERR_IMPLICIT_FUNC.search(err_line)
+                        if m:
+                            t = m.group(1)
+                            if t not in seen:
+                                new_stubs.append(f"extern void* {t}();")
+                                seen.add(t)
+                        m = _ERR_INCOMPLETE.search(err_line)
+                        if m:
+                            t = m.group(1)
+                            stub = f"struct {t}"
+                            if stub not in seen:
+                                new_stubs.append(f"struct {t} {{}};")
+                                seen.add(stub)
+                        if _ERR_COMBINE.search(err_line):
+                            src_line = src_lines[i - 2] if i >= 2 else ""
+                            for t in list(struct_stubs):
+                                if re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                                    demote.add(t)
+                    if demote:
+                        print(f"  demoting to macro: {demote}")
+                        for t in demote:
+                            old = f"typedef struct {{ char _pad[512]; }} {t};"
+                            preamble = preamble.replace(old, f"#define {t}")
+                            struct_stubs.discard(t)
+                        continue
+                    if not new_stubs:
+                        print("  no fixable errors found — giving up")
+                        break
+                    preamble += "\n" + "\n".join(new_stubs)
             break   # only debug first function
 
 
