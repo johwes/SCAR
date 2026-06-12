@@ -193,6 +193,21 @@ typedef unsigned char  uchar;
    fields here as they are discovered; self-referential pointer members
    (struct _ptr_stub *f) are valid because _ptr_stub is already declared. */
 typedef struct _ptr_stub { char _pad[512]; } _ptr_stub;
+
+/* Force Clang to emit IR for isolated Devign functions.
+   Without callers in the TU, static/inline functions are dead code and
+   clang omits their define blocks from the .ll output entirely — the
+   compilation succeeds but ir_to_graph sees an empty file.  Redefining
+   these keywords to empty makes every function externally visible. */
+#undef inline
+#define inline
+#undef __inline
+#define __inline
+#undef __inline__
+#define __inline__
+#undef __always_inline
+#define __always_inline
+#define static
 """
 
 PREAMBLE = (("\n".join(_PROJECT_INCLUDES) + "\n\n" + _PREAMBLE_STATIC)
