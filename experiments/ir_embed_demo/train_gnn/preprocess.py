@@ -205,6 +205,7 @@ _ERR_INCOMPAT_INT  = re.compile(r"error: assigning to '(\w+)' \(aka 'struct \1'\
 _ERR_BINOP_INT     = re.compile(r"error: invalid operands to binary expression \('(\w+)' \(aka 'struct \1'\) and '(?:int|long|unsigned)'\)")
 _ERR_NOT_FUNC      = re.compile(r"error: called object type 'int' is not a function or function pointer")
 _ERR_SUBSCRIPT     = re.compile(r"error: subscripted value is not an array, pointer, or vector")
+_ERR_NOT_CONST     = re.compile(r"error: expression is not an integer constant expression")
 
 # C keywords that can follow an undeclared identifier without making it a type
 _C_KEYWORDS = frozenset({
@@ -336,6 +337,7 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
         new_stubs: list[str] = []
         demote_to_macro: set[str] = set()
         demote_to_int_type: set[str] = set()
+        demote_to_const: set[str] = set()
         fn_member_upgrades: set[str] = set()
         ptr_member_upgrades: dict[str, list[str]] = {}
         int_stubs_upgraded = False
@@ -504,6 +506,22 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                                         mem not in struct_ptr_members.get(type_name, [])):
                                     ptr_member_upgrades.setdefault(type_name, []).append(mem)
 
+            # "expression is not an integer constant expression" — a static int
+            # stub was used in a switch case label. C requires case values to be
+            # compile-time constants; demote the stub to a #define so it works.
+            if _ERR_NOT_CONST.search(line):
+                src_line = lines[i + 1] if i + 1 < len(lines) else ""
+                car_line = lines[i + 2] if i + 2 < len(lines) else ""
+                pp = car_line.find("|"); cp = car_line.find("^")
+                if pp >= 0 and cp > pp:
+                    off = cp - pp - 1
+                    src = src_line[pp + 1:] if pp < len(src_line) else ""
+                    mid = re.match(r"\w+", src[off:]) if off < len(src) else None
+                    if mid:
+                        sym = mid.group(0)
+                        if f"static int {sym} = 0;" in preamble:
+                            demote_to_const.add(sym)
+
             # "no member named 'foo' in 'T'" — if T is one of our padded
             # struct stubs, inject 'foo' as an int member and rebuild the stub.
             # This handles FFmpeg/QEMU functions that access struct fields:
@@ -554,6 +572,12 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                                          struct_ptr_members.get(t, []))
                 preamble = preamble.replace(old, f"typedef int {t};", 1)
                 struct_stubs.discard(t)
+            continue
+
+        if demote_to_const:
+            for sym in demote_to_const:
+                preamble = preamble.replace(f"static int {sym} = 0;",
+                                            f"#define {sym} 0", 1)
             continue
 
         if fn_member_upgrades:
@@ -800,6 +824,8 @@ def _categorize_stderr(stderr: str) -> str:
             return "subscript-on-non-array"
         if "is not a pointer" in line:
             return "member-ref-not-pointer"
+        if "not an integer constant expression" in line:
+            return "case-label-not-const"
         if "not a function or function pointer" in line:
             return "call-on-non-func"
         if "incompatible type" in line:
@@ -882,6 +908,7 @@ def debug_one(jsonl_path: Path) -> None:
                     new_stubs = []
                     demote: set[str] = set()
                     demote_int: set[str] = set()
+                    demote_const_d: set[str] = set()
                     fn_upgrades: set[str] = set()
                     ptr_upgrades_d: dict[str, list[str]] = {}
                     int_upgraded = False
@@ -1030,6 +1057,19 @@ def debug_one(jsonl_path: Path) -> None:
                                 m_fn = re.search(r"(\w+)$", src_line[:cp2].rstrip(" ("))
                                 if m_fn:
                                     fn_upgrades.add(m_fn.group(1))
+                        if _ERR_NOT_CONST.search(err_line):
+                            src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
+                            car_line = src_lines[i + 2] if i + 2 < len(src_lines) else ""
+                            pp_c = car_line.find("|"); cp_c = car_line.find("^")
+                            if pp_c >= 0 and cp_c > pp_c:
+                                off_c = cp_c - pp_c - 1
+                                src_c = src_line[pp_c + 1:] if pp_c < len(src_line) else ""
+                                mid_c = re.match(r"\w+", src_c[off_c:]) if off_c < len(src_c) else None
+                                if mid_c:
+                                    sym_c = mid_c.group(0)
+                                    if f"static int {sym_c} = 0;" in preamble:
+                                        print(f"  demoting to const macro: {sym_c}")
+                                        demote_const_d.add(sym_c)
 
                     if demote:
                         print(f"  demoting to macro: {demote}")
@@ -1048,6 +1088,11 @@ def debug_one(jsonl_path: Path) -> None:
                                                      struct_ptr_members_d.get(t, []))
                             preamble = preamble.replace(old, f"typedef int {t};", 1)
                             struct_stubs.discard(t)
+                        continue
+                    if demote_const_d:
+                        for sym in demote_const_d:
+                            preamble = preamble.replace(f"static int {sym} = 0;",
+                                                        f"#define {sym} 0", 1)
                         continue
                     if fn_upgrades:
                         print(f"  upgrading int members → fn ptrs: {fn_upgrades}")
