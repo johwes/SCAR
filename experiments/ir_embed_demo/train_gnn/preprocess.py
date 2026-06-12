@@ -204,6 +204,7 @@ _ERR_NO_MEMBER     = re.compile(r"error: no member named '(\w+)' in '(?:struct |
 _ERR_INCOMPAT_INT  = re.compile(r"error: assigning to '(\w+)' \(aka 'struct \1'\) from incompatible type '(?:int|long|unsigned|void \*)'")
 _ERR_BINOP_INT     = re.compile(r"error: invalid operands to binary expression \('(\w+)' \(aka 'struct \1'\) and '(?:int|long|unsigned)'\)")
 _ERR_NOT_FUNC      = re.compile(r"error: called object type 'int' is not a function or function pointer")
+_ERR_SUBSCRIPT     = re.compile(r"error: subscripted value is not an array, pointer, or vector")
 
 # C keywords that can follow an undeclared identifier without making it a type
 _C_KEYWORDS = frozenset({
@@ -281,11 +282,15 @@ def _try_compile(full_source: str) -> tuple[str | None, str]:
 
 
 def _build_struct_stub(t: str, members: list[str],
-                       fn_members: list[str] | None = None) -> str:
-    """Padded struct stub with optional int and function-pointer members."""
-    fn_members = fn_members or []
-    decls  = "".join(f" int {m};" for m in members if m not in fn_members)
+                       fn_members: list[str] | None = None,
+                       ptr_members: list[str] | None = None) -> str:
+    """Padded struct stub with int, function-pointer, and void* pointer members."""
+    fn_members  = fn_members  or []
+    ptr_members = ptr_members or []
+    decls  = "".join(f" int {m};"        for m in members
+                     if m not in fn_members and m not in ptr_members)
     decls += "".join(f" void* (*{m})();" for m in fn_members)
+    decls += "".join(f" void *{m};"      for m in ptr_members)
     if decls:
         return f"typedef struct {t} {{{decls} char _pad[512]; }} {t};"
     return f"typedef struct {t} {{ char _pad[512]; }} {t};"
@@ -318,6 +323,7 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
     struct_stubs: set[str] = set()
     struct_members: dict[str, list[str]] = {}
     struct_fn_members: dict[str, list[str]] = {}   # members that are fn ptrs, not ints
+    struct_ptr_members: dict[str, list[str]] = {}  # members that are void *, not ints
 
     paid_attempts = 0   # only new_stubs additions count against the limit
     _last_stderr = ""
@@ -331,6 +337,7 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
         demote_to_macro: set[str] = set()
         demote_to_int_type: set[str] = set()
         fn_member_upgrades: set[str] = set()
+        ptr_member_upgrades: dict[str, list[str]] = {}
         int_stubs_upgraded = False
         new_member_injections: dict[str, list[str]] = {}
 
@@ -442,6 +449,7 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
             # that "t.field" and "t->field" remain valid C expressions.
             if _ERR_MEMBER_ON_INT.search(line):
                 src_line = lines[i + 1] if i + 1 < len(lines) else ""
+                car_line = lines[i + 2] if i + 2 < len(lines) else ""
                 for t in list(seen_stubs):
                     int_stub = f"static int {t} = 0;"
                     # Only upgrade if t is the BASE of a member access (t. or t->),
@@ -457,6 +465,44 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                         struct_stubs.add(struct_name)
                         struct_members[struct_name] = []
                         int_stubs_upgraded = True
+                # Also handle: caret points at a struct MEMBER that is int but
+                # used as struct or pointer (e.g. avctx->priv_data->field).
+                pp = car_line.find("|"); cp = car_line.find("^")
+                if pp >= 0 and cp > pp:
+                    off = cp - pp - 1
+                    src = src_line[pp + 1:] if pp < len(src_line) else ""
+                    mid = re.match(r"\w+", src[off:]) if off < len(src) else None
+                    if mid:
+                        mem = mid.group(0)
+                        for type_name, type_members in struct_members.items():
+                            if (mem in type_members and
+                                    mem not in struct_fn_members.get(type_name, []) and
+                                    mem not in struct_ptr_members.get(type_name, [])):
+                                ptr_member_upgrades.setdefault(type_name, []).append(mem)
+
+            # "subscripted value is not an array" — a member or var used with [i].
+            # Upgrade: top-level int stub → void * var; struct member → void * field.
+            if _ERR_SUBSCRIPT.search(line):
+                src_line = lines[i + 1] if i + 1 < len(lines) else ""
+                car_line = lines[i + 2] if i + 2 < len(lines) else ""
+                pp = car_line.find("|"); cp = car_line.find("^")
+                if pp >= 0 and cp > pp:
+                    off = cp - pp - 1
+                    src = src_line[pp + 1:] if pp < len(src_line) else ""
+                    mid = re.match(r"\w+", src[off:]) if off < len(src) else None
+                    if mid:
+                        mem = mid.group(0)
+                        int_stub_v = f"static int {mem} = 0;"
+                        if int_stub_v in preamble:
+                            preamble = preamble.replace(int_stub_v,
+                                                        f"static void *{mem} = 0;")
+                            int_stubs_upgraded = True
+                        else:
+                            for type_name, type_members in struct_members.items():
+                                if (mem in type_members and
+                                        mem not in struct_fn_members.get(type_name, []) and
+                                        mem not in struct_ptr_members.get(type_name, [])):
+                                    ptr_member_upgrades.setdefault(type_name, []).append(mem)
 
             # "no member named 'foo' in 'T'" — if T is one of our padded
             # struct stubs, inject 'foo' as an int member and rebuild the stub.
@@ -495,7 +541,8 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
         if demote_to_macro:
             for t in demote_to_macro:
                 old = _build_struct_stub(t, struct_members.get(t, []),
-                                         struct_fn_members.get(t, []))
+                                         struct_fn_members.get(t, []),
+                                         struct_ptr_members.get(t, []))
                 preamble = preamble.replace(old, f"#define {t}", 1)
                 struct_stubs.discard(t)
             continue
@@ -503,7 +550,8 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
         if demote_to_int_type:
             for t in demote_to_int_type:
                 old = _build_struct_stub(t, struct_members.get(t, []),
-                                         struct_fn_members.get(t, []))
+                                         struct_fn_members.get(t, []),
+                                         struct_ptr_members.get(t, []))
                 preamble = preamble.replace(old, f"typedef int {t};", 1)
                 struct_stubs.discard(t)
             continue
@@ -514,20 +562,40 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                     if (fn_mem in members and
                             fn_mem not in struct_fn_members.get(type_name, [])):
                         old_stub = _build_struct_stub(type_name, members,
-                                                      struct_fn_members.get(type_name, []))
+                                                      struct_fn_members.get(type_name, []),
+                                                      struct_ptr_members.get(type_name, []))
                         struct_fn_members.setdefault(type_name, []).append(fn_mem)
                         new_stub = _build_struct_stub(type_name, members,
-                                                      struct_fn_members[type_name])
+                                                      struct_fn_members[type_name],
+                                                      struct_ptr_members.get(type_name, []))
                         preamble = preamble.replace(old_stub, new_stub, 1)
+            continue
+
+        if ptr_member_upgrades:
+            for type_name, ptr_mems in ptr_member_upgrades.items():
+                old_stub = _build_struct_stub(type_name,
+                                              struct_members.get(type_name, []),
+                                              struct_fn_members.get(type_name, []),
+                                              struct_ptr_members.get(type_name, []))
+                for pm in ptr_mems:
+                    if pm not in struct_ptr_members.get(type_name, []):
+                        struct_ptr_members.setdefault(type_name, []).append(pm)
+                new_stub = _build_struct_stub(type_name,
+                                              struct_members[type_name],
+                                              struct_fn_members.get(type_name, []),
+                                              struct_ptr_members[type_name])
+                preamble = preamble.replace(old_stub, new_stub, 1)
             continue
 
         if new_member_injections:
             for type_name, new_members in new_member_injections.items():
                 old_stub = _build_struct_stub(type_name, struct_members.get(type_name, []),
-                                              struct_fn_members.get(type_name, []))
+                                              struct_fn_members.get(type_name, []),
+                                              struct_ptr_members.get(type_name, []))
                 struct_members.setdefault(type_name, []).extend(new_members)
                 new_stub = _build_struct_stub(type_name, struct_members[type_name],
-                                              struct_fn_members.get(type_name, []))
+                                              struct_fn_members.get(type_name, []),
+                                              struct_ptr_members.get(type_name, []))
                 preamble = preamble.replace(old_stub, new_stub, 1)
             continue
 
@@ -728,6 +796,10 @@ def _categorize_stderr(stderr: str) -> str:
             return "incomplete-struct"
         if "not a structure or union" in line:
             return "member-on-non-struct"
+        if "subscripted value is not an array" in line:
+            return "subscript-on-non-array"
+        if "is not a pointer" in line:
+            return "member-ref-not-pointer"
         if "not a function or function pointer" in line:
             return "call-on-non-func"
         if "incompatible type" in line:
@@ -800,6 +872,7 @@ def debug_one(jsonl_path: Path) -> None:
                 struct_stubs: set[str] = set()
                 struct_members_d: dict[str, list[str]] = {}
                 struct_fn_members_d: dict[str, list[str]] = {}
+                struct_ptr_members_d: dict[str, list[str]] = {}
                 for attempt in range(8):
                     ir2, stderr = _try_compile(preamble + "\n" + item["func"])
                     if ir2:
@@ -810,6 +883,7 @@ def debug_one(jsonl_path: Path) -> None:
                     demote: set[str] = set()
                     demote_int: set[str] = set()
                     fn_upgrades: set[str] = set()
+                    ptr_upgrades_d: dict[str, list[str]] = {}
                     int_upgraded = False
                     new_members_d: dict[str, list[str]] = {}
                     src_lines = stderr.splitlines()
@@ -884,6 +958,7 @@ def debug_one(jsonl_path: Path) -> None:
                                         demote.add(t)
                         if _ERR_MEMBER_ON_INT.search(err_line):
                             src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
+                            car_line = src_lines[i + 2] if i + 2 < len(src_lines) else ""
                             for t in list(seen):
                                 int_stub = f"static int {t} = 0;"
                                 if (int_stub in preamble and
@@ -898,6 +973,42 @@ def debug_one(jsonl_path: Path) -> None:
                                     struct_members_d[sn] = []
                                     int_upgraded = True
                                     print(f"  upgrading int stub → struct var: {t} (type {sn})")
+                            pp_d = car_line.find("|"); cp_d = car_line.find("^")
+                            if pp_d >= 0 and cp_d > pp_d:
+                                off_d = cp_d - pp_d - 1
+                                src_d = src_line[pp_d + 1:] if pp_d < len(src_line) else ""
+                                mid_d = re.match(r"\w+", src_d[off_d:]) if off_d < len(src_d) else None
+                                if mid_d:
+                                    mem_d = mid_d.group(0)
+                                    for tn, tm in struct_members_d.items():
+                                        if (mem_d in tm and
+                                                mem_d not in struct_fn_members_d.get(tn, []) and
+                                                mem_d not in struct_ptr_members_d.get(tn, [])):
+                                            print(f"  upgrading struct member → void*: {tn}.{mem_d}")
+                                            ptr_upgrades_d.setdefault(tn, []).append(mem_d)
+                        if _ERR_SUBSCRIPT.search(err_line):
+                            src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
+                            car_line = src_lines[i + 2] if i + 2 < len(src_lines) else ""
+                            pp_s = car_line.find("|"); cp_s = car_line.find("^")
+                            if pp_s >= 0 and cp_s > pp_s:
+                                off_s = cp_s - pp_s - 1
+                                src_s = src_line[pp_s + 1:] if pp_s < len(src_line) else ""
+                                mid_s = re.match(r"\w+", src_s[off_s:]) if off_s < len(src_s) else None
+                                if mid_s:
+                                    mem_s = mid_s.group(0)
+                                    int_stub_s = f"static int {mem_s} = 0;"
+                                    if int_stub_s in preamble:
+                                        preamble = preamble.replace(int_stub_s,
+                                                                    f"static void *{mem_s} = 0;")
+                                        print(f"  upgrading int stub → void*: {mem_s}")
+                                        int_upgraded = True
+                                    else:
+                                        for tn, tm in struct_members_d.items():
+                                            if (mem_s in tm and
+                                                    mem_s not in struct_fn_members_d.get(tn, []) and
+                                                    mem_s not in struct_ptr_members_d.get(tn, [])):
+                                                print(f"  upgrading struct member → void*: {tn}.{mem_s}")
+                                                ptr_upgrades_d.setdefault(tn, []).append(mem_s)
                         m = _ERR_NO_MEMBER.search(err_line)
                         if m:
                             member_name, type_name = m.group(1), m.group(2)
@@ -924,7 +1035,8 @@ def debug_one(jsonl_path: Path) -> None:
                         print(f"  demoting to macro: {demote}")
                         for t in demote:
                             old = _build_struct_stub(t, struct_members_d.get(t, []),
-                                                     struct_fn_members_d.get(t, []))
+                                                     struct_fn_members_d.get(t, []),
+                                                     struct_ptr_members_d.get(t, []))
                             preamble = preamble.replace(old, f"#define {t}", 1)
                             struct_stubs.discard(t)
                         continue
@@ -932,7 +1044,8 @@ def debug_one(jsonl_path: Path) -> None:
                         print(f"  demoting struct→int typedef: {demote_int}")
                         for t in demote_int:
                             old = _build_struct_stub(t, struct_members_d.get(t, []),
-                                                     struct_fn_members_d.get(t, []))
+                                                     struct_fn_members_d.get(t, []),
+                                                     struct_ptr_members_d.get(t, []))
                             preamble = preamble.replace(old, f"typedef int {t};", 1)
                             struct_stubs.discard(t)
                         continue
@@ -943,22 +1056,44 @@ def debug_one(jsonl_path: Path) -> None:
                                 if (fn_mem in members and
                                         fn_mem not in struct_fn_members_d.get(type_name, [])):
                                     old_stub = _build_struct_stub(
-                                        type_name, members, struct_fn_members_d.get(type_name, []))
+                                        type_name, members,
+                                        struct_fn_members_d.get(type_name, []),
+                                        struct_ptr_members_d.get(type_name, []))
                                     struct_fn_members_d.setdefault(type_name, []).append(fn_mem)
                                     new_stub = _build_struct_stub(
-                                        type_name, members, struct_fn_members_d[type_name])
+                                        type_name, members,
+                                        struct_fn_members_d[type_name],
+                                        struct_ptr_members_d.get(type_name, []))
                                     preamble = preamble.replace(old_stub, new_stub, 1)
+                        continue
+                    if ptr_upgrades_d:
+                        print(f"  upgrading int members → void*: { {k: v for k, v in ptr_upgrades_d.items()} }")
+                        for type_name, ptr_mems in ptr_upgrades_d.items():
+                            old_stub = _build_struct_stub(type_name,
+                                                          struct_members_d.get(type_name, []),
+                                                          struct_fn_members_d.get(type_name, []),
+                                                          struct_ptr_members_d.get(type_name, []))
+                            for pm in ptr_mems:
+                                if pm not in struct_ptr_members_d.get(type_name, []):
+                                    struct_ptr_members_d.setdefault(type_name, []).append(pm)
+                            new_stub = _build_struct_stub(type_name,
+                                                          struct_members_d[type_name],
+                                                          struct_fn_members_d.get(type_name, []),
+                                                          struct_ptr_members_d[type_name])
+                            preamble = preamble.replace(old_stub, new_stub, 1)
                         continue
                     if new_members_d:
                         print(f"  injecting members: { {k: v for k, v in new_members_d.items()} }")
                         for type_name, new_m in new_members_d.items():
                             old_stub = _build_struct_stub(type_name,
                                                           struct_members_d.get(type_name, []),
-                                                          struct_fn_members_d.get(type_name, []))
+                                                          struct_fn_members_d.get(type_name, []),
+                                                          struct_ptr_members_d.get(type_name, []))
                             struct_members_d.setdefault(type_name, []).extend(new_m)
                             new_stub = _build_struct_stub(type_name,
                                                           struct_members_d[type_name],
-                                                          struct_fn_members_d.get(type_name, []))
+                                                          struct_fn_members_d.get(type_name, []),
+                                                          struct_ptr_members_d.get(type_name, []))
                             preamble = preamble.replace(old_stub, new_stub, 1)
                         continue
                     if int_upgraded:
