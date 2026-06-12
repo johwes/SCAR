@@ -837,10 +837,11 @@ def process_split(jsonl_path: Path, subset: int | None, workers: int,
     graphs, ok, fail = [], 0, 0
     print(f"  Processing {len(items)} functions with {workers} workers ...")
 
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(process_item, it): it for it in items}
-        for i, fut in enumerate(as_completed(futs), 1):
-            g = fut.result()
+    if workers == 1:
+        # Run in the main process — avoids subprocess re-import of the module
+        # which can lose pkg-config header detection on some systems.
+        for i, item in enumerate(items, 1):
+            g = process_item(item)
             if g:
                 graphs.append(g)
                 ok += 1
@@ -848,6 +849,18 @@ def process_split(jsonl_path: Path, subset: int | None, workers: int,
                 fail += 1
             if i % 500 == 0:
                 print(f"    {i}/{len(items)}  ok={ok}  failed={fail}")
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(process_item, it): it for it in items}
+            for i, fut in enumerate(as_completed(futs), 1):
+                g = fut.result()
+                if g:
+                    graphs.append(g)
+                    ok += 1
+                else:
+                    fail += 1
+                if i % 500 == 0:
+                    print(f"    {i}/{len(items)}  ok={ok}  failed={fail}")
 
     print(f"  Done: {ok} graphs built, {fail} functions failed to compile "
           f"({fail/len(items)*100:.0f}% attrition)")
