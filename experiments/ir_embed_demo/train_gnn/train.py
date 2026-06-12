@@ -19,7 +19,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch_geometric.data import Data, DataLoader
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GCNConv, global_mean_pool
 
 HERE = Path(__file__).parent
