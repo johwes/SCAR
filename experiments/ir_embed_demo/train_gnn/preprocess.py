@@ -1256,7 +1256,15 @@ def main():
                     help="Print clang stderr for the first failing function and exit")
     ap.add_argument("--attrition-sample", type=int, default=None, metavar="N",
                     help="Sample N functions and print final failure breakdown")
+    ap.add_argument("--no-headers", action="store_true",
+                    help="Disable project headers — use pure stub injection only. "
+                         "Useful when system headers are newer than the dataset "
+                         "(e.g. modern FFmpeg vs Devign's 2016-era code).")
     args = ap.parse_args()
+
+    if args.no_headers:
+        global PREAMBLE
+        PREAMBLE = _PREAMBLE_STATIC
 
     if args.debug:
         src = DATA / "train.jsonl"
