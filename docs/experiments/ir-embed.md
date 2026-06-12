@@ -91,13 +91,82 @@ single-function examples, detectable without any training.
 
 ## Next experiments
 
-1. **Real IR**: run `./run.sh` inside `scar-agent` to get clang-compiled IR
-   for all 7 pairs (including bof and signedoverflow) and re-run the analysis.
+### 1. Real IR from clang (prerequisite for everything else)
 
-2. **Contrastive training**: add a 2-layer network with margin loss on
-   (vuln, fixed) pairs. Measure whether the trained embedding widens the
-   separation ratio beyond the raw histogram baseline.
+Run inside the `scar-agent` container, which has clang:
 
-3. **Real-world functions**: extract function-level IR slices from SCAR's
-   accepted patches on scarnet and zlib. Test whether the per-pair signal
-   holds when the function is not purpose-built to contain exactly one bug.
+```bash
+cd experiments/ir_embed_demo
+./run.sh        # compiles all 7 pairs; replaces hand-written ir/*.ll
+```
+
+This adds the two pairs not yet in the hand-written IR (bof, signedoverflow)
+and validates that the results hold on real compiler output rather than
+representative approximations. Re-run `demo.py` and compare the per-pair
+signal table to the baseline above.
+
+---
+
+### 2. Contrastive training step
+
+Goal: measure whether a trained embedding widens the separation ratio beyond
+the raw histogram baseline.
+
+**Add `experiments/ir_embed_demo/train.py`** — a minimal PyTorch script:
+
+```
+Input:  normalized opcode histograms (dim ≈ 70) from ir/*.ll
+Model:  MLP — Linear(70→32) → ReLU → Linear(32→16)
+Loss:   contrastive loss (Hadsell et al. 2006)
+          same-class pairs (vuln+vuln, fixed+fixed): pull together
+          cross-class pairs (vuln+fixed):            push apart, margin=0.5
+Output: 16-dim embeddings; re-run cosine distance analysis on these
+```
+
+With only 7×2 = 14 samples, use leave-one-pair-out cross-validation:
+train on 6 pairs, test separation on the held-out pair. Report whether
+the trained embedding improves the per-pair signal over the raw baseline.
+
+Requires: `pip install torch` (CPU-only is fine, no GPU needed at this scale).
+
+**Success criterion:** separation ratio on the held-out pair improves over
+the raw histogram baseline for at least 5 of 7 folds.
+
+---
+
+### 3. Real-world functions from SCAR accepted patches
+
+Goal: test whether the per-pair signal survives when the vulnerable pattern
+is buried in a real function rather than a purpose-built 10-line file.
+
+**Source:** a completed SCAR pipeline run on scarnet or zlib produces
+`.scar/scar-results.json`. Each accepted entry contains:
+- `finding.file_path` — the source file
+- `finding.line` — the vulnerable line
+- `patch` — the unified diff
+
+**Procedure:**
+
+1. For each accepted patch entry in `scar-results.json`:
+   - `original.c` = the source file as-is (vulnerable)
+   - Apply the patch with `patch -o fixed.c original.c diff.patch`
+   - Compile both: `clang -O0 -S -emit-llvm -o original.ll original.c`
+
+2. Extract the enclosing function from each `.ll` file using the finding
+   line number. A function in LLVM IR text format starts with `define` and
+   ends with the matching `}`. Walk the IR to find the function whose line
+   range contains `finding.line`.
+
+3. Run the same histogram analysis on the extracted function IR slices,
+   not the whole-file IR.
+
+4. Report the per-pair signal table as in experiment 1.
+
+**Key question:** does the separation ratio hold when the vulnerable
+subgraph is a small fraction of the total function IR? If it collapses
+below 1.1×, the granularity problem is real and subgraph-level features
+(basic-block or sliding-window) are needed before the approach is viable
+on production code.
+
+**Add `experiments/ir_embed_demo/extract_functions.py`** to automate
+steps 1–2 given a `scar-results.json` and a source directory.
