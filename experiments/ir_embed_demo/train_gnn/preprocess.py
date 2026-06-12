@@ -330,13 +330,43 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
                     struct_stubs.add(t)
                     struct_members[t] = []
 
-            # Undeclared identifier  →  int identifier = 0; (as a global)
+            # Undeclared identifier — classify by context before stubbing:
+            #   - identifier appears right after '*' in source → it's a variable
+            #     name in a pointer declaration (e.g. "T *name = ...").  Don't
+            #     stub it — it will become valid once T is resolved.
+            #   - identifier at start of statement followed by '*' or a word →
+            #     it's a type name clang couldn't resolve; stub as struct.
+            #   - otherwise (used with ->, [], etc.) → stub as int global.
             m = _ERR_UNDECL_IDENT.search(line)
             if m:
                 t = m.group(1)
                 if t not in seen_stubs:
-                    new_stubs.append(f"static int {t} = 0;")
-                    seen_stubs.add(t)
+                    src_l  = lines[i + 1] if i + 1 < len(lines) else ""
+                    car_l  = lines[i + 2] if i + 2 < len(lines) else ""
+                    pp     = car_l.find("|")
+                    cp     = car_l.find("^")
+                    stub_as_type = False
+                    skip_stub    = False
+                    if pp >= 0 and cp > pp:
+                        off     = cp - pp - 1
+                        src_c   = src_l[pp + 1:] if pp < len(src_l) else ""
+                        before  = src_c[off - 1] if off > 0 else ""
+                        after   = src_c[off + len(t):].lstrip()
+                        if before == "*":
+                            skip_stub = True   # variable name after *, not a type
+                        elif after.startswith("*") or (
+                            after and after[0].isalpha() and not after.startswith("->")
+                        ):
+                            stub_as_type = True   # looks like a type at stmt start
+
+                    if not skip_stub:
+                        if stub_as_type:
+                            new_stubs.append(_build_struct_stub(t, []))
+                            struct_stubs.add(t)
+                            struct_members[t] = []
+                        else:
+                            new_stubs.append(f"static int {t} = 0;")
+                        seen_stubs.add(t)
 
             # Implicit function declaration  →  extern void* fn();
             m = _ERR_IMPLICIT_FUNC.search(line)
@@ -346,14 +376,18 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
                     new_stubs.append(f"extern void* {t}();")
                     seen_stubs.add(t)
 
-            # Incomplete struct/union  →  add empty definition
+            # Incomplete struct/union — use a padded typedef so that subsequent
+            # "no member named" errors can inject members via member injection.
+            # The typedef also creates a type alias matching the tag name, which
+            # lets code that uses "T *ptr" (without "struct") compile too.
             m = _ERR_INCOMPLETE.search(line)
             if m:
                 t = m.group(1)
-                stub = f"struct {t}"
-                if stub not in seen_stubs:
-                    new_stubs.append(f"struct {t} {{}};")
-                    seen_stubs.add(stub)
+                if t not in seen_stubs and t not in struct_stubs:
+                    new_stubs.append(_build_struct_stub(t, []))
+                    seen_stubs.add(t)
+                    struct_stubs.add(t)
+                    struct_members[t] = []
 
             # "cannot combine with previous 'type-name'" means a name we
             # stubbed as a struct type is being used as a qualifier (e.g.
@@ -643,8 +677,28 @@ def debug_one(jsonl_path: Path) -> None:
                         if m:
                             t = m.group(1)
                             if t not in seen:
-                                new_stubs.append(f"static int {t} = 0;")
-                                seen.add(t)
+                                sl  = src_lines[i + 1] if i + 1 < len(src_lines) else ""
+                                cl  = src_lines[i + 2] if i + 2 < len(src_lines) else ""
+                                pp2 = cl.find("|"); cp2 = cl.find("^")
+                                stub_as_type2 = False; skip2 = False
+                                if pp2 >= 0 and cp2 > pp2:
+                                    off2   = cp2 - pp2 - 1
+                                    sc2    = sl[pp2 + 1:] if pp2 < len(sl) else ""
+                                    bef2   = sc2[off2 - 1] if off2 > 0 else ""
+                                    aft2   = sc2[off2 + len(t):].lstrip()
+                                    if bef2 == "*":
+                                        skip2 = True
+                                    elif aft2.startswith("*") or (
+                                        aft2 and aft2[0].isalpha() and not aft2.startswith("->")
+                                    ):
+                                        stub_as_type2 = True
+                                if not skip2:
+                                    if stub_as_type2:
+                                        new_stubs.append(_build_struct_stub(t, []))
+                                        struct_stubs.add(t); struct_members_d[t] = []
+                                    else:
+                                        new_stubs.append(f"static int {t} = 0;")
+                                    seen.add(t)
                         m = _ERR_IMPLICIT_FUNC.search(err_line)
                         if m:
                             t = m.group(1)
@@ -654,10 +708,10 @@ def debug_one(jsonl_path: Path) -> None:
                         m = _ERR_INCOMPLETE.search(err_line)
                         if m:
                             t = m.group(1)
-                            stub = f"struct {t}"
-                            if stub not in seen:
-                                new_stubs.append(f"struct {t} {{}};")
-                                seen.add(stub)
+                            if t not in seen and t not in struct_stubs:
+                                new_stubs.append(_build_struct_stub(t, []))
+                                seen.add(t)
+                                struct_stubs.add(t); struct_members_d[t] = []
                         if _ERR_COMBINE.search(err_line):
                             src_line   = src_lines[i + 1] if i + 1 < len(src_lines) else ""
                             caret_line = src_lines[i + 2] if i + 2 < len(src_lines) else ""
