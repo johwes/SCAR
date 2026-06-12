@@ -135,12 +135,11 @@ detection would require:
 - **Full CFG/DFG graph representation** (ProGraML-style) so the model sees
   control-flow paths and data dependencies, not just opcode frequencies.
 - **Thousands of training pairs** across diverse codebases, not dozens.
-  Public datasets (BigVul, CVEfixes, PatchDB) exist at source level;
-  compiling them to IR at scale is a non-trivial infrastructure investment.
 - **Interprocedural context** — embedding call-graph subgraphs rather than
   individual functions.
 
-Even then, the ML-based vulnerability detection literature has a poor
+Both blockers are largely resolved by existing open work — see experiment 4
+below. Even so, the ML-based vulnerability detection literature has a poor
 track record of generalising beyond benchmark conditions. This is a
 research direction, not a near-term production capability.
 
@@ -245,3 +244,64 @@ on production code.
 
 **Add `experiments/ir_embed_demo/extract_functions.py`** to automate
 steps 1–2 given a `scar-results.json` and a source directory.
+
+---
+
+### 4. ProGraML + Devign — full graph model on real vulnerability data
+
+This experiment addresses both open questions experiments 1–3 cannot: the
+full CFG/DFG graph representation, and training data at scale.
+
+**The two pieces that already exist:**
+
+- **Devign dataset** — ~27,000 labeled C functions from FFmpeg, QEMU,
+  Linux Kernel, and LibTIFF, each marked vulnerable or non-vulnerable.
+  Real production code, real CVEs, not synthetic examples. Available via
+  [CodeXGLUE](https://github.com/microsoft/CodeXGLUE) (Microsoft's code
+  intelligence benchmark collection).
+
+- **ProGraML** — open-source implementation of graph-based LLVM IR
+  representations combining control-flow, data-flow, and call edges, plus
+  GNN training code. Repository:
+  [github.com/ChrisCummins/ProGraML](https://github.com/ChrisCummins/ProGraML).
+  Takes LLVM bitcode as input; emits a graph representation ready for a
+  message-passing GNN.
+
+**Procedure:**
+
+1. Download Devign from CodeXGLUE. Each entry is a C function string with
+   a binary label (0 = safe, 1 = vulnerable).
+
+2. Compile each function to LLVM IR:
+   ```bash
+   clang -O0 -S -emit-llvm -x c - -o fn.ll <<< "$function_source"
+   ```
+   Functions that fail to compile (missing headers, etc.) are discarded.
+   Expect ~20% attrition; the dataset is large enough to absorb it.
+
+3. Run ProGraML's `ir2graph` on each `.ll` to produce the CFG/DFG graph.
+
+4. Train ProGraML's GNN classifier on the Devign labels. ProGraML's
+   existing training code handles batching and the message-passing loop —
+   no new model code required.
+
+5. Evaluate on a held-out test split. Report AUC-ROC and compare against
+   the Devign paper's baseline results to confirm the setup is correct.
+
+**Success criterion:** AUC-ROC ≥ 0.80 on the Devign test split, matching
+the order of magnitude reported in the ProGraML paper. This confirms the
+pipeline works before any SCAR-specific fine-tuning.
+
+**SCAR integration (after step 5 passes):**
+
+The `build-bitcode` task already emits LLVM bitcode for the target
+codebase. A new `ir-embed-scan` Tekton task would:
+- Run `ir2graph` on each function in the bitcode
+- Score against the trained model
+- Write top-K findings (by vulnerability probability) to
+  `findings-ir-embed.json`
+- Feed into the existing repair loop alongside IKOS and LLM findings
+
+Zero LLM cost per scan. Runs in seconds. Fine-tune periodically on
+accumulated SCAR accepted patches to specialise to the patterns SCAR
+encounters in practice.
