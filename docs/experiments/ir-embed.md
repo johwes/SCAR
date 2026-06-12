@@ -377,3 +377,79 @@ Tekton task would parse each function's IR with `graph_demo.py`'s
 extractor, score it against the trained model, and write top-K findings
 to `findings-ir-embed.json` — feeding into the repair loop alongside IKOS
 and LLM findings. Zero LLM cost per scan.
+
+---
+
+### 4c. GNN v2 — RGCNConv + data flow edges (conditional on 4b result)
+
+**Trigger:** only pursue this if 4b stalls below 62% after ~10K training graphs.
+If 4b reaches 62%+, the CFG-only hypothesis is proved and this becomes a
+research extension rather than a fix.
+
+**The problem with adding DFG edges to a standard GCNConv:**
+Merging CFG and DFG edges into a single `edge_index` forces the aggregation
+to use one shared weight matrix for both edge types. The model cannot
+distinguish "block B executes after block A" from "block C uses a value
+defined in block A" — it must implicitly guess edge type from node features
+alone, wasting capacity and producing noisy gradients.
+
+**The correct architecture: RGCNConv (Relational GCN)**
+
+PyTorch Geometric's `RGCNConv` learns a separate weight matrix per edge type:
+- W_CFG — projects features along control-flow edges
+- W_DFG — projects features along data-dependency edges
+
+Implementation diff from current `train.py` is small:
+
+```python
+# train.py — swap GCNConv for RGCNConv
+from torch_geometric.nn import RGCNConv, global_mean_pool
+
+class DefectGNN(torch.nn.Module):
+    def __init__(self, in_features=N_FEATURES, hidden=64):
+        super().__init__()
+        self.conv1 = RGCNConv(in_features, hidden, num_relations=2)
+        self.conv2 = RGCNConv(hidden, hidden, num_relations=2)
+        self.lin   = torch.nn.Linear(hidden, 1)
+
+    def forward(self, x, edge_index, edge_type, batch):
+        x = F.relu(self.conv1(x, edge_index, edge_type))
+        x = F.dropout(x, p=0.3, training=self.training)
+        x = F.relu(self.conv2(x, edge_index, edge_type))
+        x = global_mean_pool(x, batch)
+        return self.lin(x).squeeze(-1)
+```
+
+**Extracting DFG edges from IR:**
+
+LLVM IR is in SSA form — every value (`%name`) is defined exactly once and
+all uses are explicit. The scaffolding is already in `preprocess.py`:
+
+```python
+_DEF     = re.compile(r"^\s+(%[\w.]+)\s*=")   # value definition
+_USE_VAR = re.compile(r"%[\w.]+")              # value uses
+```
+
+These are parsed but currently unused. Wiring them up in `_parse_ir`:
+1. For each instruction: record which `%name` it defines
+2. For each instruction: find all `%name` references after the `=`
+3. For each use, look up which basic block defined that value
+4. Add a DFG edge from the defining block to the using block (if cross-block)
+
+`preprocess.py` graph format would add two keys:
+```python
+{
+    "x":          ...,           # node features (unchanged)
+    "edge_index": ...,           # all edges (CFG + DFG concatenated)
+    "edge_type":  ...,           # 0 = CFG, 1 = DFG
+    "y":          ...,
+}
+```
+
+**Why intra-function DFG is available from isolated snippets:**
+SSA def-use chains are entirely self-contained within a function. The
+snippet isolation that causes compilation attrition does not affect DFG
+extraction — all the data flow information for values defined and used
+within the function is present in the `.ll` output. Interprocedural data
+flow (tracing values into called functions) is not available, but that
+limitation applies equally to ProGraML without a full project build.
