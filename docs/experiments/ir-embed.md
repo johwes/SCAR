@@ -247,61 +247,118 @@ steps 1–2 given a `scar-results.json` and a source directory.
 
 ---
 
-### 4. ProGraML + Devign — full graph model on real vulnerability data
+### 4a. CodeBERT / UniXcoder fine-tune on Devign — lowest friction path
 
-This experiment addresses both open questions experiments 1–3 cannot: the
-full CFG/DFG graph representation, and training data at scale.
+**What it is:** Fine-tune a pre-trained transformer on Devign source code.
+Operates on raw C function text, not LLVM IR. No compilation step, no
+graph construction. The training code, dataset download, and evaluator are
+all already written in the CodeXGLUE repo.
 
-**The two pieces that already exist:**
+**Published results on Devign test set:**
 
-- **Devign dataset** — ~27,000 labeled C functions from FFmpeg, QEMU,
-  Linux Kernel, and LibTIFF, each marked vulnerable or non-vulnerable.
-  Real production code, real CVEs, not synthetic examples. Available via
-  [CodeXGLUE](https://github.com/microsoft/CodeXGLUE) (Microsoft's code
-  intelligence benchmark collection).
-
-- **ProGraML** — open-source implementation of graph-based LLVM IR
-  representations combining control-flow, data-flow, and call edges, plus
-  GNN training code. Repository:
-  [github.com/ChrisCummins/ProGraML](https://github.com/ChrisCummins/ProGraML).
-  Takes LLVM bitcode as input; emits a graph representation ready for a
-  message-passing GNN.
+| Model | Accuracy |
+|---|---|
+| UniXcoder (`microsoft/unixcoder-base`) | 69.29% |
+| CodeBERT (`microsoft/codebert-base`) | 62.08% |
+| RoBERTa | 61.05% |
+| TextCNN | 60.69% |
 
 **Procedure:**
 
-1. Download Devign from CodeXGLUE. Each entry is a C function string with
-   a binary label (0 = safe, 1 = vulnerable).
-
-2. Compile each function to LLVM IR:
+1. Download dataset:
    ```bash
-   clang -O0 -S -emit-llvm -x c - -o fn.ll <<< "$function_source"
+   cd Code-Code/Defect-detection/dataset
+   pip install gdown
+   gdown https://drive.google.com/uc?id=1x6hoF7G-tSYxg8AFybggypLZgMGDNHfF
+   python preprocess.py
    ```
-   Functions that fail to compile (missing headers, etc.) are discarded.
-   Expect ~20% attrition; the dataset is large enough to absorb it.
+
+2. Fine-tune (CodeBERT baseline — swap `model_name_or_path` for UniXcoder):
+   ```bash
+   python run.py \
+       --model_name_or_path microsoft/codebert-base \
+       --do_train \
+       --train_data_file dataset/train.jsonl \
+       --eval_data_file  dataset/valid.jsonl \
+       --test_data_file  dataset/test.jsonl \
+       --epoch 5 --block_size 400 \
+       --train_batch_size 32 --eval_batch_size 64 \
+       --learning_rate 2e-5 --seed 123456
+   ```
+
+3. Evaluate: `python evaluator/evaluator.py -a dataset/test.jsonl -p saved_models/predictions.txt`
+
+**Infrastructure:** single GPU, 2–4 hours. Google Colab T4 is sufficient.
+No compilation, no graph tooling — `pip install transformers` and run.
+
+**The tradeoff:** These models see source code tokens, not IR structure.
+Variable names, formatting, and coding style all influence the prediction.
+The normalisation benefit of working at the IR level is absent. A function
+written defensively but with unfamiliar style may score as vulnerable;
+a genuinely vulnerable function written in a familiar idiom may not.
+
+**Success criterion:** reproduce the published accuracy within ±1% to
+confirm the setup is correct. Then fine-tune further on SCAR accepted
+patches to specialise to SCAR's encountered patterns.
+
+---
+
+### 4b. ProGraML + Devign — structural graph model on LLVM IR
+
+This is the theoretically correct path for SCAR's use case. It operates
+on the same LLVM IR that SCAR's `build-bitcode` task already produces,
+normalising away all surface noise and capturing actual control and data
+flow structure.
+
+**The two pieces that already exist:**
+
+- **Devign dataset** — same 27,318 labeled C functions as experiment 4a.
+  Available via [CodeXGLUE](https://github.com/microsoft/CodeXGLUE).
+
+- **ProGraML** — open-source CFG/DFG graph pipeline over LLVM IR plus GNN
+  training code. [github.com/ChrisCummins/ProGraML](https://github.com/ChrisCummins/ProGraML).
+  Takes LLVM bitcode as input; emits a graph ready for a message-passing GNN.
+
+**Procedure:**
+
+1. Download Devign (same as 4a step 1).
+
+2. Compile each function to LLVM IR. Many Devign functions reference
+   external headers; compile with `-x c` in permissive mode and discard
+   failures (~20% attrition expected, dataset is large enough to absorb it):
+   ```bash
+   clang -O0 -S -emit-llvm -x c -w -o fn.ll - <<< "$func_source"
+   ```
 
 3. Run ProGraML's `ir2graph` on each `.ll` to produce the CFG/DFG graph.
 
-4. Train ProGraML's GNN classifier on the Devign labels. ProGraML's
-   existing training code handles batching and the message-passing loop —
-   no new model code required.
+4. Train ProGraML's GNN classifier on the Devign labels using the existing
+   training loop — no new model code required.
 
-5. Evaluate on a held-out test split. Report AUC-ROC and compare against
-   the Devign paper's baseline results to confirm the setup is correct.
+5. Evaluate on the held-out test split. Compare accuracy against the 4a
+   token-model baseline to measure what the structural representation buys.
 
-**Success criterion:** AUC-ROC ≥ 0.80 on the Devign test split, matching
-the order of magnitude reported in the ProGraML paper. This confirms the
-pipeline works before any SCAR-specific fine-tuning.
+**Infrastructure:** same single-GPU requirement as 4a, but the compile +
+graph-construction preprocessing adds 1–2 hours of CPU work upfront.
 
-**SCAR integration (after step 5 passes):**
+**Success criterion:** accuracy ≥ 62% (matching CodeBERT) confirms the
+graph pipeline is working. Accuracy > 69% (beating UniXcoder) would
+indicate the structural representation is earning its extra complexity.
 
-The `build-bitcode` task already emits LLVM bitcode for the target
-codebase. A new `ir-embed-scan` Tekton task would:
+**Why this matters for SCAR specifically:**
+
+SCAR's `build-bitcode` task already emits LLVM bitcode. Once a trained
+model exists, a new `ir-embed-scan` Tekton task can:
 - Run `ir2graph` on each function in the bitcode
-- Score against the trained model
-- Write top-K findings (by vulnerability probability) to
-  `findings-ir-embed.json`
-- Feed into the existing repair loop alongside IKOS and LLM findings
+- Score against the model
+- Write top-K findings to `findings-ir-embed.json`
+- Feed into the repair loop alongside IKOS and LLM findings
 
-Zero LLM cost per scan. Runs in seconds. Fine-tune periodically on
-accumulated SCAR accepted patches to specialise to the patterns SCAR
-encounters in practice.
+Zero LLM cost per scan. Fine-tune periodically on accumulated SCAR accepted
+patches to specialise to the patterns SCAR encounters in practice. The
+token-model path (4a) does not have a natural equivalent here — it would
+need to operate on source, not on the bitcode SCAR already produces.
+
+**Recommended order:** run 4a first to validate the dataset and training
+infrastructure cheaply, then attempt 4b. If 4b accuracy does not exceed
+4a, the structural representation is not earning its cost at this scale.
