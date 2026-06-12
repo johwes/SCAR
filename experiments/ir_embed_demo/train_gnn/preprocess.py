@@ -201,8 +201,6 @@ _ERR_INCOMPLETE    = re.compile(r"error: incomplete definition of type '(?:struc
 _ERR_COMBINE       = re.compile(r"error: cannot combine with previous '(?:type-name|storage class)' declaration specifier")
 _ERR_MEMBER_ON_INT = re.compile(r"error: member reference (?:base )?type '(?:int|char)(?: \*+)?' is not (?:a structure or union|a pointer)")
 _ERR_NO_MEMBER     = re.compile(r"error: no member named '(\w+)' in '(?:struct |union )?(\w+)'")
-# Extracts the source line number from a clang diagnostic (for cascade detection)
-_ERR_SRC_LINENO    = re.compile(r":(\d+):\d+: (?:error|warning):")
 
 # C keywords that can follow an undeclared identifier without making it a type
 _C_KEYWORDS = frozenset({
@@ -283,8 +281,8 @@ def _build_struct_stub(t: str, members: list[str]) -> str:
     """Padded struct stub with optional named int members for member-access compilation."""
     if members:
         member_decls = "".join(f" int {m};" for m in members)
-        return f"typedef struct {{{member_decls} char _pad[512]; }} {t};"
-    return f"typedef struct {{ char _pad[512]; }} {t};"
+        return f"typedef struct {t} {{{member_decls} char _pad[512]; }} {t};"
+    return f"typedef struct {t} {{ char _pad[512]; }} {t};"
 
 
 def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
@@ -328,27 +326,6 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
 
         lines = stderr.splitlines()
 
-        # ---- Pre-pass: cascade detection for undeclared identifiers ----
-        # When clang fails to parse "Type *var;" (T unknown), it falls back to
-        # treating it as a multiplication expression and emits two "undeclared
-        # identifier" errors on the exact same source line: first=T (the type),
-        # second=var (the variable name).  Grouping by source line lets us
-        # classify without guessing from token layout.
-        _undecl_by_src_line: dict[int, list[str]] = defaultdict(list)
-        for err_line in lines:
-            m = _ERR_UNDECL_IDENT.search(err_line)
-            if m and m.group(1) not in seen_stubs:
-                loc = _ERR_SRC_LINENO.search(err_line)
-                if loc:
-                    _undecl_by_src_line[int(loc.group(1))].append(m.group(1))
-
-        _cascade_types: set[str] = set()   # first identifier on a shared line → type
-        _cascade_vars:  set[str] = set()   # subsequent identifiers → declaration vars
-        for names in _undecl_by_src_line.values():
-            if len(names) >= 2:
-                _cascade_types.add(names[0])
-                _cascade_vars.update(names[1:])
-
         for i, line in enumerate(lines):
             # Unknown type name  →  padded struct so member access works
             m = _ERR_UNKNOWN_TYPE.search(line)
@@ -360,59 +337,47 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
                     struct_stubs.add(t)
                     struct_members[t] = []
 
-            # Undeclared identifier — three cases:
-            #  1. Cascade: 2+ errors on same source line → first=type, rest=vars
-            #  2. Single on its line: whitespace-normalised heuristic
-            #     - before_char=="*" → variable after pointer star → skip
-            #     - after starts with "*" (not multiplication) → type → struct stub
-            #     - after starts with an identifier word (not C keyword) → type stub
-            #     - otherwise → int stub (used as flag/constant/expression var)
+            # Undeclared identifier — whitespace-normalised heuristic:
+            #   before_char == "*"  → variable after pointer star → skip
+            #   after starts with "*" and after[1] is alpha/_/* → pointer declarator → type stub
+            #   after starts with alpha (not C keyword) → type stub
+            #   otherwise → int stub (constant / expression variable)
             m = _ERR_UNDECL_IDENT.search(line)
             if m:
                 t = m.group(1)
                 if t not in seen_stubs:
-                    if t in _cascade_vars:
-                        seen_stubs.add(t)   # suppress: this is a declaration variable
-                    elif t in _cascade_types:
-                        new_stubs.append(_build_struct_stub(t, []))
-                        seen_stubs.add(t)
-                        struct_stubs.add(t)
-                        struct_members[t] = []
-                    else:
-                        # Single-identifier line: use whitespace-normalised heuristic
-                        src_l = lines[i + 1] if i + 1 < len(lines) else ""
-                        car_l = lines[i + 2] if i + 2 < len(lines) else ""
-                        pp = car_l.find("|"); cp = car_l.find("^")
-                        stub_as_type = False; skip_stub = False
-                        if pp >= 0 and cp > pp:
-                            off    = cp - pp - 1
-                            src_c  = src_l[pp + 1:] if pp < len(src_l) else ""
-                            # Whitespace-normalised look-behind
-                            prefix     = src_c[:off].rstrip()
-                            before_char = prefix[-1] if prefix else ""
-                            # Whitespace-normalised look-ahead
-                            after = src_c[off + len(t):].lstrip()
-                            if before_char == "*":
-                                skip_stub = True   # var after *, not a type
-                            elif after.startswith("*"):
-                                # Guard against multiplication: a*b vs T*var
-                                expr = after.split(";")[0]
-                                is_mult = any(op in expr for op in ("=", "+", "-", "/"))
-                                if not is_mult:
-                                    stub_as_type = True
-                            elif after and after[0].isalpha():
-                                first_word = re.split(r"\W", after)[0]
-                                if first_word not in _C_KEYWORDS:
-                                    stub_as_type = True
+                    src_l = lines[i + 1] if i + 1 < len(lines) else ""
+                    car_l = lines[i + 2] if i + 2 < len(lines) else ""
+                    pp = car_l.find("|"); cp = car_l.find("^")
+                    stub_as_type = False; skip_stub = False
+                    if pp >= 0 and cp > pp:
+                        off    = cp - pp - 1
+                        src_c  = src_l[pp + 1:] if pp < len(src_l) else ""
+                        prefix     = src_c[:off].rstrip()
+                        before_char = prefix[-1] if prefix else ""
+                        after = src_c[off + len(t):].lstrip()
+                        if before_char == "*":
+                            skip_stub = True   # var after *, not a type
+                        elif after.startswith("*"):
+                            # Distinguish pointer declarator (T *var) from multiplication (a * b):
+                            # In "T *var", after[1] is alpha/_ or another *
+                            # In "a * b", after[1] is a space
+                            next_ch = after[1:2]
+                            if next_ch and (next_ch.isalpha() or next_ch == "_" or next_ch == "*"):
+                                stub_as_type = True
+                        elif after and after[0].isalpha():
+                            first_word = re.split(r"\W", after)[0]
+                            if first_word not in _C_KEYWORDS:
+                                stub_as_type = True
 
-                        if not skip_stub:
-                            if stub_as_type:
-                                new_stubs.append(_build_struct_stub(t, []))
-                                struct_stubs.add(t)
-                                struct_members[t] = []
-                            else:
-                                new_stubs.append(f"static int {t} = 0;")
-                            seen_stubs.add(t)
+                    if not skip_stub:
+                        if stub_as_type:
+                            new_stubs.append(_build_struct_stub(t, []))
+                            struct_stubs.add(t)
+                            struct_members[t] = []
+                        else:
+                            new_stubs.append(f"static int {t} = 0;")
+                        seen_stubs.add(t)
 
             # Implicit function declaration  →  extern void* fn();
             m = _ERR_IMPLICIT_FUNC.search(line)
@@ -713,19 +678,6 @@ def debug_one(jsonl_path: Path) -> None:
                     new_members_d: dict[str, list[str]] = {}
                     src_lines = stderr.splitlines()
 
-                    # Pre-pass: cascade detection (same logic as compile_to_ir)
-                    _ubl: dict[int, list[str]] = defaultdict(list)
-                    for el in src_lines:
-                        mm = _ERR_UNDECL_IDENT.search(el)
-                        if mm and mm.group(1) not in seen:
-                            loc = _ERR_SRC_LINENO.search(el)
-                            if loc:
-                                _ubl[int(loc.group(1))].append(mm.group(1))
-                    _ctypes: set[str] = set(); _cvars: set[str] = set()
-                    for _names in _ubl.values():
-                        if len(_names) >= 2:
-                            _ctypes.add(_names[0]); _cvars.update(_names[1:])
-
                     for i, err_line in enumerate(src_lines):
                         m = _ERR_UNKNOWN_TYPE.search(err_line)
                         if m:
@@ -737,39 +689,33 @@ def debug_one(jsonl_path: Path) -> None:
                         if m:
                             t = m.group(1)
                             if t not in seen:
-                                if t in _cvars:
+                                sl  = src_lines[i + 1] if i + 1 < len(src_lines) else ""
+                                cl  = src_lines[i + 2] if i + 2 < len(src_lines) else ""
+                                pp2 = cl.find("|"); cp2 = cl.find("^")
+                                stub_as_type2 = False; skip2 = False
+                                if pp2 >= 0 and cp2 > pp2:
+                                    off2    = cp2 - pp2 - 1
+                                    sc2     = sl[pp2 + 1:] if pp2 < len(sl) else ""
+                                    prefix2 = sc2[:off2].rstrip()
+                                    bef2    = prefix2[-1] if prefix2 else ""
+                                    aft2    = sc2[off2 + len(t):].lstrip()
+                                    if bef2 == "*":
+                                        skip2 = True
+                                    elif aft2.startswith("*"):
+                                        nch2 = aft2[1:2]
+                                        if nch2 and (nch2.isalpha() or nch2 == "_" or nch2 == "*"):
+                                            stub_as_type2 = True
+                                    elif aft2 and aft2[0].isalpha():
+                                        fw2 = re.split(r"\W", aft2)[0]
+                                        if fw2 not in _C_KEYWORDS:
+                                            stub_as_type2 = True
+                                if not skip2:
+                                    if stub_as_type2:
+                                        new_stubs.append(_build_struct_stub(t, []))
+                                        struct_stubs.add(t); struct_members_d[t] = []
+                                    else:
+                                        new_stubs.append(f"static int {t} = 0;")
                                     seen.add(t)
-                                elif t in _ctypes:
-                                    new_stubs.append(_build_struct_stub(t, []))
-                                    seen.add(t); struct_stubs.add(t); struct_members_d[t] = []
-                                else:
-                                    sl  = src_lines[i + 1] if i + 1 < len(src_lines) else ""
-                                    cl  = src_lines[i + 2] if i + 2 < len(src_lines) else ""
-                                    pp2 = cl.find("|"); cp2 = cl.find("^")
-                                    stub_as_type2 = False; skip2 = False
-                                    if pp2 >= 0 and cp2 > pp2:
-                                        off2   = cp2 - pp2 - 1
-                                        sc2    = sl[pp2 + 1:] if pp2 < len(sl) else ""
-                                        prefix2 = sc2[:off2].rstrip()
-                                        bef2    = prefix2[-1] if prefix2 else ""
-                                        aft2    = sc2[off2 + len(t):].lstrip()
-                                        if bef2 == "*":
-                                            skip2 = True
-                                        elif aft2.startswith("*"):
-                                            expr2 = aft2.split(";")[0]
-                                            if not any(op in expr2 for op in ("=", "+", "-", "/")):
-                                                stub_as_type2 = True
-                                        elif aft2 and aft2[0].isalpha():
-                                            fw2 = re.split(r"\W", aft2)[0]
-                                            if fw2 not in _C_KEYWORDS:
-                                                stub_as_type2 = True
-                                    if not skip2:
-                                        if stub_as_type2:
-                                            new_stubs.append(_build_struct_stub(t, []))
-                                            struct_stubs.add(t); struct_members_d[t] = []
-                                        else:
-                                            new_stubs.append(f"static int {t} = 0;")
-                                        seen.add(t)
                         m = _ERR_IMPLICIT_FUNC.search(err_line)
                         if m:
                             t = m.group(1)
