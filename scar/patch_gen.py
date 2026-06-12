@@ -32,7 +32,10 @@ Your patch must:
   while adding a bounds check around it is fine
 - Never use strcpy, strcat, sprintf, vsprintf, or gets
 - Preserve all existing function signatures and struct layouts
-- Use bounded alternatives: strncpy, snprintf, memcpy with explicit length checks
+- Use bounded alternatives: snprintf(dst, sizeof(dst), "%s", src) is preferred \
+  for string copies; if you use strncpy you must add explicit null-termination \
+  on the very next line (dst[sizeof(dst) - 1] = '\\0'); memcpy with explicit \
+  length checks
 - When fixing multiple occurrences in the same function, do not re-declare \
   the same local variable in each hunk — declare it once before the affected \
   block, or use distinct variable names per hunk to avoid C redeclaration errors
@@ -78,7 +81,9 @@ Rules for the changes:
 - Never add new calls to malloc, free, realloc, calloc, or alloca
 - Never use strcpy, strcat, sprintf, vsprintf, or gets
 - Preserve all existing function signatures and struct layouts
-- Use bounded alternatives: strncpy+NUL, snprintf, memcpy with explicit \
+- Use bounded alternatives: snprintf(dst, sizeof(dst), "%s", src) is preferred \
+  for string copies; if you use strncpy you must add explicit null-termination \
+  on the very next line (dst[sizeof(dst) - 1] = '\\0'); memcpy with explicit \
   length checks
 """
 
