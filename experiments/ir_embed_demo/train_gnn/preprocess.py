@@ -123,6 +123,7 @@ _ERR_UNDECL_IDENT  = re.compile(r"error: use of undeclared identifier '(\w+)'")
 _ERR_IMPLICIT_FUNC = re.compile(r"warning: implicit declaration of function '(\w+)'")
 _ERR_INCOMPLETE    = re.compile(r"error: incomplete definition of type '(?:struct|union|enum) (\w+)'")
 _ERR_COMBINE       = re.compile(r"error: cannot combine with previous '(?:type-name|storage class)' declaration specifier")
+_ERR_MEMBER_ON_INT = re.compile(r"error: member reference (?:base )?type '(?:int|char)(?: \*+)?' is not (?:a structure or union|a pointer)")
 
 # ---------------------------------------------------------------------------
 # Step 1 — Download + split Devign
@@ -260,14 +261,27 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
             # "cannot combine with previous 'type-name'" means a name we
             # stubbed as a struct type is being used as a qualifier (e.g.
             # "static av_cold int func").  Find which struct stub appears
-            # on the error source line (reported one line earlier) and
-            # convert it from a struct typedef to a no-op macro.
+            # on the error source line (printed one line after the error)
+            # and convert it from a struct typedef to a no-op macro.
             if _ERR_COMBINE.search(line):
-                # clang prints the source line two lines before the caret
-                src_line = lines[i - 2] if i >= 2 else ""
+                # clang format: error line, then "  NN | <source>", then caret
+                src_line = lines[i + 1] if i + 1 < len(lines) else ""
                 for t in list(struct_stubs):
                     if re.search(r"\b" + re.escape(t) + r"\b", src_line):
                         demote_to_macro.add(t)
+
+            # "member reference ... type 'int' is not a pointer/struct" means
+            # a name was stubbed as `static int t = 0` but is actually used
+            # as a pointer to struct (via -> or .). Upgrade it to a padded
+            # struct typedef so member access passes the type check.
+            if _ERR_MEMBER_ON_INT.search(line):
+                src_line = lines[i + 1] if i + 1 < len(lines) else ""
+                for t in list(seen_stubs):
+                    int_stub = f"static int {t} = 0;"
+                    if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                        preamble = preamble.replace(int_stub,
+                                                    f"typedef struct {{ char _pad[512]; }} {t};")
+                        struct_stubs.add(t)
 
         if demote_to_macro:
             # Rebuild preamble: replace struct stub with empty macro
@@ -490,7 +504,7 @@ def debug_one(jsonl_path: Path) -> None:
                                 new_stubs.append(f"struct {t} {{}};")
                                 seen.add(stub)
                         if _ERR_COMBINE.search(err_line):
-                            src_line = src_lines[i - 2] if i >= 2 else ""
+                            src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
                             for t in list(struct_stubs):
                                 if re.search(r"\b" + re.escape(t) + r"\b", src_line):
                                     demote.add(t)
