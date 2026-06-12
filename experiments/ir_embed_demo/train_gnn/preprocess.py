@@ -200,6 +200,7 @@ _ERR_IMPLICIT_FUNC = re.compile(r"warning: implicit declaration of function '(\w
 _ERR_INCOMPLETE    = re.compile(r"error: incomplete definition of type '(?:struct|union|enum) (\w+)'")
 _ERR_COMBINE       = re.compile(r"error: cannot combine with previous '(?:type-name|storage class)' declaration specifier")
 _ERR_MEMBER_ON_INT = re.compile(r"error: member reference (?:base )?type '(?:int|char)(?: \*+)?' is not (?:a structure or union|a pointer)")
+_ERR_NO_MEMBER     = re.compile(r"error: no member named '(\w+)' in '(?:struct |union )?(\w+)'")
 
 # ---------------------------------------------------------------------------
 # Step 1 — Download + split Devign
@@ -270,7 +271,15 @@ def _try_compile(full_source: str) -> tuple[str | None, str]:
             ir_path.unlink(missing_ok=True)
 
 
-def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
+def _build_struct_stub(t: str, members: list[str]) -> str:
+    """Padded struct stub with optional named int members for member-access compilation."""
+    if members:
+        member_decls = "".join(f" int {m};" for m in members)
+        return f"typedef struct {{{member_decls} char _pad[512]; }} {t};"
+    return f"typedef struct {{ char _pad[512]; }} {t};"
+
+
+def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
     """
     Compile one C function string to LLVM IR.
 
@@ -281,17 +290,25 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
 
     Unknown types are stubbed as padded structs (not void*) so that
     pointer member access (avctx->field) gets past the type check.
-    If clang then complains that a struct typedef is being used as a
+    When clang then reports "no member named 'foo' in 'T'", we inject
+    'foo' as an int field into the stub and retry — with -ferror-limit=0
+    all missing members are reported at once so one retry typically suffices.
+    If clang complains that a struct typedef is being used as a
     storage-class qualifier (e.g. "av_cold int func"), we detect the
     "cannot combine" error, identify the offending name from context,
     and replace the struct stub with a no-op macro (#define T).
+    Member injections, demotions, and int-stub upgrades are free retries
+    (do not count against max_retries); only new-stub additions are charged.
     """
     preamble = PREAMBLE
     seen_stubs: set[str] = set()
     # track which names were added as struct stubs so we can demote them
     struct_stubs: set[str] = set()
+    # track injected members per struct stub so we can rebuild correctly
+    struct_members: dict[str, list[str]] = {}
 
-    for attempt in range(max_retries):
+    paid_attempts = 0   # only new_stubs additions count against the limit
+    for _ in range(max_retries):
         ir, stderr = _try_compile(preamble + "\n" + func_source)
         if ir is not None:
             return ir
@@ -299,6 +316,7 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
         new_stubs: list[str] = []
         demote_to_macro: set[str] = set()
         int_stubs_upgraded = False
+        new_member_injections: dict[str, list[str]] = {}
 
         lines = stderr.splitlines()
         for i, line in enumerate(lines):
@@ -307,9 +325,10 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
             if m:
                 t = m.group(1)
                 if t not in seen_stubs:
-                    new_stubs.append(f"typedef struct {{ char _pad[512]; }} {t};")
+                    new_stubs.append(_build_struct_stub(t, []))
                     seen_stubs.add(t)
                     struct_stubs.add(t)
+                    struct_members[t] = []
 
             # Undeclared identifier  →  int identifier = 0; (as a global)
             m = _ERR_UNDECL_IDENT.search(line)
@@ -374,19 +393,44 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
                 for t in list(seen_stubs):
                     int_stub = f"static int {t} = 0;"
                     if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
-                        preamble = preamble.replace(int_stub,
-                                                    f"typedef struct {{ char _pad[512]; }} {t};")
+                        new_stub = _build_struct_stub(t, [])
+                        preamble = preamble.replace(int_stub, new_stub)
                         struct_stubs.add(t)
+                        struct_members[t] = []
                         int_stubs_upgraded = True
+
+            # "no member named 'foo' in 'T'" — if T is one of our padded
+            # struct stubs, inject 'foo' as an int member and rebuild the stub.
+            # This handles FFmpeg/QEMU functions that access struct fields:
+            #   avctx->width, avctx->bit_rate, etc.
+            # With -ferror-limit=0 clang reports all missing members in one
+            # pass, so one retry usually suffices per function.
+            m = _ERR_NO_MEMBER.search(line)
+            if m:
+                member_name, type_name = m.group(1), m.group(2)
+                if type_name in struct_stubs:
+                    existing = struct_members.get(type_name, [])
+                    pending  = new_member_injections.get(type_name, [])
+                    if member_name not in existing and member_name not in pending:
+                        new_member_injections.setdefault(type_name, []).append(member_name)
 
         if demote_to_macro:
             # Rebuild preamble: replace struct stub with empty macro
             for t in demote_to_macro:
-                old = f"typedef struct {{ char _pad[512]; }} {t};"
-                preamble = preamble.replace(old, f"#define {t}")
+                old = _build_struct_stub(t, struct_members.get(t, []))
+                preamble = preamble.replace(old, f"#define {t}", 1)
                 struct_stubs.discard(t)
             # Don't count this as a wasted attempt — loop again
             continue
+
+        if new_member_injections:
+            # Rebuild each modified struct stub with newly discovered members
+            for type_name, new_members in new_member_injections.items():
+                old_stub = _build_struct_stub(type_name, struct_members.get(type_name, []))
+                struct_members.setdefault(type_name, []).extend(new_members)
+                new_stub = _build_struct_stub(type_name, struct_members[type_name])
+                preamble = preamble.replace(old_stub, new_stub, 1)
+            continue  # retry without counting as wasted attempt
 
         if int_stubs_upgraded:
             # preamble was modified in-place; retry without wasting attempt
@@ -394,6 +438,9 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
 
         if not new_stubs:
             return None   # error type we can't auto-fix
+        paid_attempts += 1
+        if paid_attempts >= max_retries:
+            return None
         preamble += "\n" + "\n".join(new_stubs)
 
     return None
@@ -573,6 +620,7 @@ def debug_one(jsonl_path: Path) -> None:
                 preamble = PREAMBLE
                 seen: set[str] = set()
                 struct_stubs: set[str] = set()
+                struct_members_d: dict[str, list[str]] = {}
                 for attempt in range(6):
                     ir2, stderr = _try_compile(preamble + "\n" + item["func"])
                     if ir2:
@@ -582,14 +630,15 @@ def debug_one(jsonl_path: Path) -> None:
                     new_stubs = []
                     demote: set[str] = set()
                     int_upgraded = False
+                    new_members_d: dict[str, list[str]] = {}
                     src_lines = stderr.splitlines()
                     for i, err_line in enumerate(src_lines):
                         m = _ERR_UNKNOWN_TYPE.search(err_line)
                         if m:
                             t = m.group(1)
                             if t not in seen:
-                                new_stubs.append(f"typedef struct {{ char _pad[512]; }} {t};")
-                                seen.add(t); struct_stubs.add(t)
+                                new_stubs.append(_build_struct_stub(t, []))
+                                seen.add(t); struct_stubs.add(t); struct_members_d[t] = []
                         m = _ERR_UNDECL_IDENT.search(err_line)
                         if m:
                             t = m.group(1)
@@ -630,17 +679,33 @@ def debug_one(jsonl_path: Path) -> None:
                             for t in list(seen):
                                 int_stub = f"static int {t} = 0;"
                                 if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
-                                    preamble = preamble.replace(int_stub,
-                                                                f"typedef struct {{ char _pad[512]; }} {t};")
+                                    preamble = preamble.replace(int_stub, _build_struct_stub(t, []))
                                     struct_stubs.add(t)
+                                    struct_members_d[t] = []
                                     int_upgraded = True
                                     print(f"  upgrading int stub → struct: {t}")
+                        m = _ERR_NO_MEMBER.search(err_line)
+                        if m:
+                            member_name, type_name = m.group(1), m.group(2)
+                            if type_name in struct_stubs:
+                                existing = struct_members_d.get(type_name, [])
+                                pending  = new_members_d.get(type_name, [])
+                                if member_name not in existing and member_name not in pending:
+                                    new_members_d.setdefault(type_name, []).append(member_name)
                     if demote:
                         print(f"  demoting to macro: {demote}")
                         for t in demote:
-                            old = f"typedef struct {{ char _pad[512]; }} {t};"
-                            preamble = preamble.replace(old, f"#define {t}")
+                            old = _build_struct_stub(t, struct_members_d.get(t, []))
+                            preamble = preamble.replace(old, f"#define {t}", 1)
                             struct_stubs.discard(t)
+                        continue
+                    if new_members_d:
+                        print(f"  injecting members: { {k: v for k, v in new_members_d.items()} }")
+                        for type_name, new_m in new_members_d.items():
+                            old_stub = _build_struct_stub(type_name, struct_members_d.get(type_name, []))
+                            struct_members_d.setdefault(type_name, []).extend(new_m)
+                            new_stub = _build_struct_stub(type_name, struct_members_d[type_name])
+                            preamble = preamble.replace(old_stub, new_stub, 1)
                         continue
                     if int_upgraded:
                         continue

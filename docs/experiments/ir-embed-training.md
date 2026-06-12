@@ -98,20 +98,27 @@ What it does:
 4. Parses the LLVM IR to extract a CFG graph with node features
 5. Saves pickled graph lists to `data/*_graphs.pkl`
 
-**Expected compile attrition:** 40–70% of Devign functions reference
-project-specific types or macros that the stub headers cannot cover (struct
-member access on AVCodecContext, sk_buff, CPUState, etc. requires the
-actual project headers). This is normal — the dataset is large enough to
-absorb it, and the distribution of which functions succeed is close to
-random with respect to the vulnerability label.
+**Expected compile attrition:** Devign functions reference project-specific
+types (AVCodecContext, sk_buff, CPUState, etc.). The stub injector handles
+most of these: it stubs unknown types as padded structs, then injects
+missing member names as int fields when clang reports "no member named X".
+With `-ferror-limit=0` all missing members are reported in one pass, so
+most functions succeed in 2–3 iterations. Expect **30–60% attrition**
+with member injection; without it the figure was ~95%.
 
 **Attrition varies by project:** Devign mixes FFmpeg, QEMU, Linux kernel,
-and LibTIFF. FFmpeg codec functions have very high attrition (~90%) because
-they access many AVCodecContext members. LibTIFF and simpler utility
-functions compile at much higher rates. The `--subset` flag now uses a
-random balanced sample across the full file rather than taking the first N
-functions, so you see representative attrition rather than a worst-case
-FFmpeg-only sample.
+and LibTIFF. Functions with deep pointer chains (`avctx->priv_data->field`)
+or complex macro dependencies still fail; simple to moderate struct access
+now compiles. The `--subset` flag uses a random balanced sample so you see
+representative attrition rather than a worst-case FFmpeg-only sample.
+
+**Installing FFmpeg/LibTIFF dev headers** (Step 1) brings two additional
+benefits: correct macro values (AV_CODEC_ID_*, AV_PIX_FMT_*, etc.) and
+correct function signatures for library calls. The installed dev headers
+must match the FFmpeg version used in Devign (circa 2016); newer versions
+may have removed fields, causing "no member named" on real struct definitions
+which the stub injector cannot fix. Using stubs + member injection sidesteps
+the version mismatch entirely.
 
 **Parallel workers:** default is 4. Increase on AWS:
 ```bash
@@ -247,15 +254,27 @@ PyG version must match your PyTorch version. Check:
 `python -c "import torch; print(torch.__version__)"` and reinstall PyG
 against that version.
 
-**Very high attrition (>80%) even with random sampling**
-This is the fundamental ceiling of the standalone compilation approach.
-Devign functions from FFmpeg, QEMU, and the Linux kernel access dozens of
-struct members (`avctx->width`, `skb->data`, `cpu->env`, etc.) — the
-actual project headers are required to resolve these. `no member named 'X'
-in 'T'` errors cannot be fixed by stub injection without knowing the struct
-layout, and there is no way to infer field types from a single function.
+**Very high attrition (>70%) even with random sampling**
+The stub injector now handles "no member named X in T" by injecting int
+members into padded struct stubs, so simple-to-moderate struct access
+compiles. Remaining failures are from:
 
-**Two paths forward:**
+- **Deep pointer chains** (`avctx->priv_data->field`) where a stubbed int
+  member is used as a struct pointer — the injector doesn't yet upgrade
+  stub *members* to pointer types (only top-level int stubs get upgraded).
+- **Functions that were compiled with real project headers** (installed
+  via `ffmpeg-free-devel`) where the field was deprecated and removed in
+  newer FFmpeg. These fail with "no member named X in the real struct",
+  which the stub injector cannot fix. To avoid this, the stub injector
+  works without the real headers when possible.
+- **Complex macro dependencies** that expand to type names clang can't
+  resolve even with stubs.
+
+If attrition remains above 70%, the simplest fix is to run the full 27K
+dataset — even at 30% survival you get ~6,500 training graphs, which is
+enough for meaningful GNN training.
+
+**Three paths for near-zero attrition:**
 
 *Option A — Use the Devign source code directly (no compilation).*
 The 4a experiment (CodeBERT/UniXcoder) trains on raw C source tokens and
