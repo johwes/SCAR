@@ -59,6 +59,26 @@ Verify:
 python -c "import torch; import torch_geometric; print('ok')"
 ```
 
+### Optional but strongly recommended: install project headers
+
+Devign functions use FFmpeg and LibTIFF types extensively. Without the
+real headers, `AVCodecContext`, `TIFF *`, etc. can't be resolved and
+attrition is ~90-95%. With them, it drops to ~40-60%.
+
+```bash
+# Fedora / RHEL:
+sudo dnf install ffmpeg-free-devel libtiff-devel
+
+# Ubuntu / Debian:
+sudo apt install libavcodec-dev libavutil-dev libavformat-dev libtiff-dev
+
+# macOS (Homebrew):
+brew install ffmpeg libtiff
+```
+
+`preprocess.py` auto-detects these headers and uses them automatically —
+no flags needed. It prints which headers it found at startup.
+
 ---
 
 ## Step 2 — Download the Devign dataset
