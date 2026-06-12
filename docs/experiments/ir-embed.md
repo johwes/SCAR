@@ -89,6 +89,73 @@ single-function examples, detectable without any training.
 
 ---
 
+## Practical ceiling
+
+### What this approach structurally cannot detect
+
+The fundamental limitation is the absence of taint/dataflow analysis.
+Opcode histograms — and even full CFG/DFG graph embeddings — cannot follow
+a value across function boundaries and determine whether it was sanitized
+before reaching a dangerous sink. Most serious real-world vulnerabilities
+require exactly that reasoning:
+
+- **Injection and buffer overflows from user input**: requires tracking
+  tainted input through call chains to where it is used without bounds
+  checking. Structural similarity to a known-unsafe function is not enough
+  — the same function shape can be safe or unsafe depending on whether the
+  caller validated the input.
+- **Use-after-free in complex allocation patterns**: the dangerous access
+  may be in a different function from the free. No per-function embedding
+  can see this.
+- **Integer overflows in protocol parsing**: depends on the range of values
+  reachable at a specific point, not the presence or absence of a branch.
+
+Tools like CodeQL exist precisely to answer these questions with
+interprocedural dataflow graphs. This approach does not compete with that.
+
+### Where it realistically fits
+
+The honest position is **cheap pre-filter, not standalone detector**:
+
+1. Embed every function's IR against the known-vulnerable corpus.
+2. Flag functions with high structural similarity to known-vulnerable
+   patterns as candidates.
+3. Feed those candidates into CodeQL, Semgrep, or the SCAR LLM repair loop
+   for the expensive, precise analysis.
+
+This costs zero LLM calls and runs in seconds. If it surfaces real
+candidates that rule-based tools then confirm, it earns its place in the
+pipeline as a prioritisation signal.
+
+### What would need to be true to become competitive
+
+Raw opcode histograms are the weakest form of this idea. Competitive
+detection would require:
+
+- **Full CFG/DFG graph representation** (ProGraML-style) so the model sees
+  control-flow paths and data dependencies, not just opcode frequencies.
+- **Thousands of training pairs** across diverse codebases, not dozens.
+  Public datasets (BigVul, CVEfixes, PatchDB) exist at source level;
+  compiling them to IR at scale is a non-trivial infrastructure investment.
+- **Interprocedural context** — embedding call-graph subgraphs rather than
+  individual functions.
+
+Even then, the ML-based vulnerability detection literature has a poor
+track record of generalising beyond benchmark conditions. This is a
+research direction, not a near-term production capability.
+
+### The one genuinely novel property
+
+The self-improving corpus is the most defensible advantage over static
+rule-based tools. Every SCAR accepted patch on any target is a labelled
+(vulnerable IR, fixed IR) pair produced at zero marginal cost. CodeQL rules
+do not improve when you find a new bug. A model retrained on accumulated
+SCAR patches does — and it specialises to exactly the patterns SCAR
+encounters in practice. Whether that specialisation translates to useful
+detection precision on unseen code is the core empirical question.
+
+---
+
 ## Next experiments
 
 ### 1. Real IR from clang (prerequisite for everything else)
