@@ -227,10 +227,38 @@ PyG version must match your PyTorch version. Check:
 `python -c "import torch; print(torch.__version__)"` and reinstall PyG
 against that version.
 
-**Very high attrition (>60% functions fail to compile)**
-Normal for Linux-kernel functions which use kernel-specific headers.
-FFmpeg and QEMU functions compile much more reliably. The split is random
-so all subsets have mixed project origins — just accept the attrition.
+**Very high attrition (>80%) even with random sampling**
+This is the fundamental ceiling of the standalone compilation approach.
+Devign functions from FFmpeg, QEMU, and the Linux kernel access dozens of
+struct members (`avctx->width`, `skb->data`, `cpu->env`, etc.) — the
+actual project headers are required to resolve these. `no member named 'X'
+in 'T'` errors cannot be fixed by stub injection without knowing the struct
+layout, and there is no way to infer field types from a single function.
+
+**Two paths forward:**
+
+*Option A — Use the Devign source code directly (no compilation).*
+The 4a experiment (CodeBERT/UniXcoder) trains on raw C source tokens and
+achieves 62–69% on the Devign test set. No clang, no IR, no attrition.
+Friction is minimal: `pip install transformers` and run the CodeXGLUE
+`run.py` script. This is the right path for getting a trained classifier
+on Devign.
+
+*Option B — Build the projects with real headers.*
+Clone FFmpeg, QEMU, Linux, and LibTIFF, build each with
+`-flto -fembed-bitcode` to emit whole-program bitcode, then use
+`llvm-extract --func=NAME` to pull per-function IR. This is the approach
+ProGraML used. Attrition drops to near zero but setup takes several hours.
+
+*Option C — Use a standalone-compilable dataset.*
+The NIST Juliet Test Suite (~28K C/C++ cases, CWE-labeled, no external
+headers required) compiles standalone. Attrition with the stub injector
+will be <10%. Trade-off: synthetic code, limited generalization to
+real-world vulnerability patterns.
+
+For SCAR's own integration target (the `ir-embed-scan` Tekton task), the
+attrition problem does not exist — the full build system is available and
+functions are compiled in their proper project context.
 
 **Training loss stuck at ~0.69 (log(2))**
 The model is predicting 50/50. Try:

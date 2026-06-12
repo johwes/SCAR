@@ -328,12 +328,29 @@ required. The same approach was validated as an end-to-end GNN PoC
 | `train_gnn/preprocess.py` | Downloads Devign, compiles 27K C functions to IR, builds graphs with 11 node features, saves pickled datasets |
 | `train_gnn/train.py` | 2-layer GCNConv → global mean pool → binary classifier, PyTorch Geometric, saves best checkpoint |
 
-**To run on your laptop (CPU, quick sanity check):**
+**Devign standalone compilation — known limitation:**
+Devign functions come from FFmpeg, QEMU, and the Linux kernel. They access
+many struct members (`avctx->width`, `skb->data`) which require the actual
+project headers. Stub injection handles unknown types and qualifiers but
+cannot synthesise struct member layouts. Observed attrition is ~90-95%
+on random Devign samples. Practical paths:
+
+- **For training on Devign:** use the 4a approach (CodeBERT) — no compilation
+  needed, 62-69% baseline already published.
+- **For the GNN specifically:** build FFmpeg/QEMU/Linux from source with
+  `-flto -fembed-bitcode` and extract per-function IR from the bitcode, as
+  ProGraML did. Or use the NIST Juliet Test Suite (~28K synthetic C cases,
+  standalone compilable, <10% attrition).
+- **For SCAR integration:** attrition is not a problem. The Tekton
+  `build-bitcode` task builds the target project in its actual environment;
+  functions are compiled in full project context.
+
+**To run on your laptop (pipeline smoke test with ~30 graphs):**
 ```bash
 cd experiments/ir_embed_demo/train_gnn
 pip install gdown torch --index-url https://download.pytorch.org/whl/cpu
 pip install torch_geometric
-python preprocess.py --subset 500
+python preprocess.py --subset 500   # ~22-35 graphs survive; enough to test
 python train.py --epochs 10 --hidden 32
 ```
 
@@ -346,7 +363,8 @@ has\_load, has\_icmp, has\_alloca, has\_getelementptr, has\_ret, has\_br.
 **Success criterion:** accuracy ≥ 62% (CodeBERT baseline) on the Devign
 test split confirms the structural graph representation is competitive.
 Accuracy > 69% (UniXcoder) would mean IR structure is earning its cost
-over token-based models.
+over token-based models. This criterion requires a full compilable dataset
+(either via project build or Juliet).
 
 **SCAR integration (after training):**
 
