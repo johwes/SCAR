@@ -221,6 +221,7 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
 
         new_stubs: list[str] = []
         demote_to_macro: set[str] = set()
+        int_stubs_upgraded = False
 
         lines = stderr.splitlines()
         for i, line in enumerate(lines):
@@ -299,6 +300,7 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
                         preamble = preamble.replace(int_stub,
                                                     f"typedef struct {{ char _pad[512]; }} {t};")
                         struct_stubs.add(t)
+                        int_stubs_upgraded = True
 
         if demote_to_macro:
             # Rebuild preamble: replace struct stub with empty macro
@@ -307,6 +309,10 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
                 preamble = preamble.replace(old, f"#define {t}")
                 struct_stubs.discard(t)
             # Don't count this as a wasted attempt — loop again
+            continue
+
+        if int_stubs_upgraded:
+            # preamble was modified in-place; retry without wasting attempt
             continue
 
         if not new_stubs:
@@ -493,6 +499,7 @@ def debug_one(jsonl_path: Path) -> None:
                     print(f"\n--- attempt {attempt+1} stderr ---\n{stderr[:3000]}")
                     new_stubs = []
                     demote: set[str] = set()
+                    int_upgraded = False
                     src_lines = stderr.splitlines()
                     for i, err_line in enumerate(src_lines):
                         m = _ERR_UNKNOWN_TYPE.search(err_line)
@@ -536,12 +543,24 @@ def debug_one(jsonl_path: Path) -> None:
                                 for t in list(struct_stubs):
                                     if re.search(r"\b" + re.escape(t) + r"\b", src_line):
                                         demote.add(t)
+                        if _ERR_MEMBER_ON_INT.search(err_line):
+                            src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
+                            for t in list(seen):
+                                int_stub = f"static int {t} = 0;"
+                                if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                                    preamble = preamble.replace(int_stub,
+                                                                f"typedef struct {{ char _pad[512]; }} {t};")
+                                    struct_stubs.add(t)
+                                    int_upgraded = True
+                                    print(f"  upgrading int stub → struct: {t}")
                     if demote:
                         print(f"  demoting to macro: {demote}")
                         for t in demote:
                             old = f"typedef struct {{ char _pad[512]; }} {t};"
                             preamble = preamble.replace(old, f"#define {t}")
                             struct_stubs.discard(t)
+                        continue
+                    if int_upgraded:
                         continue
                     if not new_stubs:
                         print("  no fixable errors found — giving up")
