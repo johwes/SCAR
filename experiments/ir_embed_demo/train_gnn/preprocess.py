@@ -291,7 +291,8 @@ def _build_struct_stub(t: str, members: list[str],
     return f"typedef struct {t} {{ char _pad[512]; }} {t};"
 
 
-def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
+def compile_to_ir(func_source: str, max_retries: int = 12,
+                  _failure_capture: list | None = None) -> str | None:
     """
     Compile one C function string to LLVM IR.
 
@@ -319,10 +320,12 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
     struct_fn_members: dict[str, list[str]] = {}   # members that are fn ptrs, not ints
 
     paid_attempts = 0   # only new_stubs additions count against the limit
+    _last_stderr = ""
     for _ in range(max_retries):
         ir, stderr = _try_compile(preamble + "\n" + func_source)
         if ir is not None:
             return ir
+        _last_stderr = stderr
 
         new_stubs: list[str] = []
         demote_to_macro: set[str] = set()
@@ -532,12 +535,18 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
             continue
 
         if not new_stubs:
-            return None   # error type we can't auto-fix
+            if _failure_capture is not None:
+                _failure_capture.append(_last_stderr)
+            return None
         paid_attempts += 1
         if paid_attempts >= max_retries:
+            if _failure_capture is not None:
+                _failure_capture.append(_last_stderr)
             return None
         preamble += "\n" + "\n".join(new_stubs)
 
+    if _failure_capture is not None:
+        _failure_capture.append(_last_stderr)
     return None
 
 
@@ -696,6 +705,81 @@ def process_split(jsonl_path: Path, subset: int | None, workers: int,
     print(f"  Done: {ok} graphs built, {fail} functions failed to compile "
           f"({fail/len(items)*100:.0f}% attrition)")
     return graphs
+
+
+# ---------------------------------------------------------------------------
+# Attrition analysis — sample N functions and report final failure categories
+# ---------------------------------------------------------------------------
+
+def _categorize_stderr(stderr: str) -> str:
+    """Return a short label for the first unfixed error type in a final stderr."""
+    for line in stderr.splitlines():
+        if ": error:" not in line:
+            continue
+        if "no member named" in line:
+            m = re.search(r"no member named '(\w+)' in '(?:struct )?(\w+)'", line)
+            if m:
+                return f"no-member-in:{m.group(2)}"
+            return "no-member-named"
+        if "unknown type name" in line:
+            m = re.search(r"unknown type name '(\w+)'", line)
+            return f"unknown-type:{m.group(1)}" if m else "unknown-type"
+        if "incomplete definition" in line:
+            return "incomplete-struct"
+        if "not a structure or union" in line:
+            return "member-on-non-struct"
+        if "not a function or function pointer" in line:
+            return "call-on-non-func"
+        if "incompatible type" in line:
+            return "type-mismatch"
+        if "invalid operands" in line:
+            return "invalid-operands"
+        if "use of undeclared identifier" in line:
+            m = re.search(r"use of undeclared identifier '(\w+)'", line)
+            return f"undeclared:{m.group(1)}" if m else "undeclared-id"
+        if "cannot combine" in line:
+            return "cannot-combine-specifier"
+        if "implicit declaration" in line:
+            return "implicit-func-decl"
+        m = re.search(r"error: (.{0,50})", line)
+        if m:
+            return m.group(1).strip()[:40]
+    return "timeout-or-exception" if not stderr.strip() else "unknown"
+
+
+def attrition_sample(jsonl_path: Path, n: int, seed: int = 42) -> None:
+    """Compile N random functions and report final failure categories."""
+    import collections
+    rng = random.Random(seed)
+    with open(jsonl_path) as f:
+        items = [json.loads(l) for l in f]
+    rng.shuffle(items)
+    items = items[:n]
+
+    cats: collections.Counter = collections.Counter()
+    ok = 0
+    print(f"  Sampling {n} functions from {jsonl_path.name} (sequential, ~1-3 min) ...")
+    for item in items:
+        cap: list = []
+        ir = compile_to_ir(item["func"], _failure_capture=cap)
+        if ir is not None:
+            ok += 1
+        else:
+            cats[_categorize_stderr(cap[0] if cap else "")] += 1
+
+    fail = n - ok
+    print(f"\n── Attrition sample ({n} functions) ────────────────────")
+    print(f"  Compiled OK : {ok}  ({ok/n*100:.0f}%)")
+    print(f"  Failed      : {fail}  ({fail/n*100:.0f}%)")
+    if cats:
+        print(f"\n  Final failure breakdown (top 15):")
+        total_shown = 0
+        for cat, cnt in cats.most_common(15):
+            pct = cnt / fail * 100
+            print(f"    {cnt:4d}  {pct:4.0f}%  {cat}")
+            total_shown += cnt
+        if total_shown < fail:
+            print(f"    {fail-total_shown:4d}  {(fail-total_shown)/fail*100:4.0f}%  (other)")
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +982,8 @@ def main():
                     help="Skip download if data/*.jsonl already exist")
     ap.add_argument("--debug", action="store_true",
                     help="Print clang stderr for the first failing function and exit")
+    ap.add_argument("--attrition-sample", type=int, default=None, metavar="N",
+                    help="Sample N functions and print final failure breakdown")
     args = ap.parse_args()
 
     if args.debug:
@@ -907,6 +993,14 @@ def main():
             sys.exit(1)
         print(f"Debugging first function in {src} ...")
         debug_one(src)
+        sys.exit(0)
+
+    if args.attrition_sample:
+        src = DATA / "train.jsonl"
+        if not src.exists():
+            print("Run without --attrition-sample first to download the dataset.")
+            sys.exit(1)
+        attrition_sample(src, args.attrition_sample, seed=args.seed)
         sys.exit(0)
 
     print("\n── Headers ──────────────────────────────────────────────")
