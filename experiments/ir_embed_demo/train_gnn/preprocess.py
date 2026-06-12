@@ -434,7 +434,10 @@ def compile_to_ir(func_source: str, max_retries: int = 12) -> str | None:
                 src_line = lines[i + 1] if i + 1 < len(lines) else ""
                 for t in list(seen_stubs):
                     int_stub = f"static int {t} = 0;"
-                    if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                    # Only upgrade if t is the BASE of a member access (t. or t->),
+                    # not merely present on the same line as another member access.
+                    if (int_stub in preamble and
+                            re.search(r"\b" + re.escape(t) + r"\s*(?:\.|->)", src_line)):
                         struct_name  = f"_struct_{t}"
                         typedef_stub = _build_struct_stub(struct_name, [])
                         is_ptr       = re.search(r"\b" + re.escape(t) + r"\s*->", src_line)
@@ -751,7 +754,8 @@ def debug_one(jsonl_path: Path) -> None:
                             src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
                             for t in list(seen):
                                 int_stub = f"static int {t} = 0;"
-                                if int_stub in preamble and re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                                if (int_stub in preamble and
+                                        re.search(r"\b" + re.escape(t) + r"\s*(?:\.|->)", src_line)):
                                     sn       = f"_struct_{t}"
                                     td_stub  = _build_struct_stub(sn, [])
                                     is_ptr   = re.search(r"\b" + re.escape(t) + r"\s*->", src_line)
