@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .sarif_bridge import IkosSarifBridge, Finding
 from . import context_gen, patch_gen, triage, validator, llm
+from .validator import enrich_hint
 
 # Optional OSS-CRS integration — libCRS is injected via PYTHONPATH when SCAR
 # runs inside an OSS-CRS environment or via SCAR's own Tekton pipeline (where
@@ -113,7 +114,7 @@ def _process_file_group(
             try:
                 patch = patch_gen.generate_structured(
                     finding, briefing, source, trace_dir=trace_dir,
-                    failure_hint=f"{val.stage}: {val.detail}",
+                    failure_hint=enrich_hint(val, Path(source)),
                     previous_patch=patch,
                 )
                 val = validator.validate(patch, source, repo_root=args.repo, tag=tag)

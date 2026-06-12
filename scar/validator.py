@@ -18,6 +18,17 @@ _UNBOUNDED_LOOP = re.compile(r"\bwhile\s*\(\s*(1|true)\s*\)")
 _LINE_COMMENT = re.compile(r"//[^\n]*")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
+# Matches the start of a C function definition (not a keyword call or macro use).
+_FUNC_DEF_RE = re.compile(
+    r"^\s*(?:(?:static|inline|extern|local|ZEXPORT|ZEXPORTVA|Z_INTERNAL)\s+)*"
+    r"(?:(?:const|volatile|unsigned|signed|long|short)\s+)*"
+    r"[\w\*]+(?:\s+[\w\*]+)*\s+\*?\s*(\w+)\s*\(",
+)
+_C_KEYWORDS = frozenset({
+    "if", "for", "while", "switch", "do", "return", "else", "case",
+    "sizeof", "typedef", "struct", "union", "enum", "goto",
+})
+
 
 def _strip_c_comments(code: str) -> str:
     code = _BLOCK_COMMENT.sub("", code)
@@ -29,6 +40,61 @@ class ValidationResult:
     passed: bool
     stage: str      # "safety" | "patch_apply" | "compile" | "ok"
     detail: str
+
+
+def _find_enclosing_function(lines: list[str], target_idx: int) -> str | None:
+    """Walk backwards from target_idx and return the nearest C function signature.
+
+    Collects lines from the definition up to (but not including) the opening
+    brace so the caller sees the full parameter list.
+    """
+    cap = min(target_idx, len(lines) - 1)
+    for i in range(cap, max(0, cap - 200), -1):
+        raw = lines[i]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("//", "*", "/*", "#")):
+            continue
+        m = _FUNC_DEF_RE.match(raw)
+        if m and m.group(1) not in _C_KEYWORDS:
+            sig_parts = [raw.rstrip()]
+            for j in range(i + 1, min(i + 10, len(lines))):
+                nl = lines[j].rstrip()
+                if "{" in nl:
+                    before = nl[: nl.index("{")].strip()
+                    if before:
+                        sig_parts.append(before)
+                    break
+                sig_parts.append(nl)
+                if ")" in nl:
+                    break
+            return " ".join(p.strip() for p in sig_parts if p.strip())
+    return None
+
+
+def enrich_hint(result: ValidationResult, source_path: Path) -> str:
+    """Return result as a hint string, enriched for 'undeclared identifier' errors.
+
+    When the model uses a variable name that doesn't exist in the patched scope,
+    the enclosing function signature tells the correction loop exactly which
+    parameters and local names are actually available at that point.
+    """
+    hint = f"{result.stage}: {result.detail}"
+    if result.stage != "compile":
+        return hint
+    if "undeclared identifier" not in result.detail and "use of undeclared" not in result.detail:
+        return hint
+    m = re.search(r":(\d+):\d+: error:", result.detail)
+    if not m:
+        return hint
+    error_line = int(m.group(1))
+    try:
+        src_lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        sig = _find_enclosing_function(src_lines, error_line - 1)
+        if sig:
+            hint += f"\nEnclosing function (variables in scope): {sig}"
+    except Exception:
+        pass
+    return hint
 
 
 def validate(
