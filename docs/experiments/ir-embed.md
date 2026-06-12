@@ -328,29 +328,33 @@ required. The same approach was validated as an end-to-end GNN PoC
 | `train_gnn/preprocess.py` | Downloads Devign, compiles 27K C functions to IR, builds graphs with 11 node features, saves pickled datasets |
 | `train_gnn/train.py` | 2-layer GCNConv → global mean pool → binary classifier, PyTorch Geometric, saves best checkpoint |
 
-**Devign standalone compilation — known limitation:**
-Devign functions come from FFmpeg, QEMU, and the Linux kernel. They access
-many struct members (`avctx->width`, `skb->data`) which require the actual
-project headers. Stub injection handles unknown types and qualifiers but
-cannot synthesise struct member layouts. Observed attrition is ~90-95%
-on random Devign samples. Practical paths:
+**Devign standalone compilation — current status:**
+Devign functions come from FFmpeg, QEMU, and the Linux kernel. Two fixes
+were needed to get usable graphs:
 
-- **For training on Devign:** use the 4a approach (CodeBERT) — no compilation
-  needed, 62-69% baseline already published.
-- **For the GNN specifically:** build FFmpeg/QEMU/Linux from source with
-  `-flto -fembed-bitcode` and extract per-function IR from the bitcode, as
-  ProGraML did. Or use the NIST Juliet Test Suite (~28K synthetic C cases,
-  standalone compilable, <10% attrition).
+1. **Stub injection** (member injection, ptr/arr upgrades, macro demotions)
+   handles unknown types and missing struct members. This brings compile
+   attrition from ~95% down to ~52%.
+2. **`#define static` / `#define inline`** at the end of the preamble
+   forces clang to emit IR for isolated functions. Without callers in the
+   translation unit, `static`/`inline` functions pass syntax checking but
+   clang omits their `define` blocks from the `.ll` output entirely —
+   compilation succeeds but the IR file is empty.
+
+With both fixes applied, **~48% of Devign functions produce valid graphs**
+and `graphed` matches `compiled` (no additional filtering by the IR parser).
+On the full 27K dataset this yields ~8K training graphs for the train split.
+
 - **For SCAR integration:** attrition is not a problem. The Tekton
   `build-bitcode` task builds the target project in its actual environment;
   functions are compiled in full project context.
 
-**To run on your laptop (pipeline smoke test with ~30 graphs):**
+**To run on your laptop (pipeline smoke test):**
 ```bash
 cd experiments/ir_embed_demo/train_gnn
 pip install gdown torch --index-url https://download.pytorch.org/whl/cpu
 pip install torch_geometric
-python preprocess.py --subset 500   # ~22-35 graphs survive; enough to test
+python preprocess.py --subset 500   # ~240 graphs survive; enough to test
 python train.py --epochs 10 --hidden 32
 ```
 

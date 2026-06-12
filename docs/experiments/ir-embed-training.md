@@ -87,7 +87,7 @@ The dataset is hosted on Google Drive via the CodeXGLUE benchmark.
 `preprocess.py` downloads it automatically using `gdown`:
 
 ```bash
-python preprocess.py --subset 500   # laptop: 500 examples, takes ~2 min
+python preprocess.py --subset 500   # laptop: 500 examples → ~240 graphs, takes ~2 min
 python preprocess.py                # full: 27K examples, takes ~30-60 min
 ```
 
@@ -255,24 +255,23 @@ PyG version must match your PyTorch version. Check:
 against that version.
 
 **Very high attrition (>70%) even with random sampling**
-The stub injector now handles "no member named X in T" by injecting int
-members into padded struct stubs, so simple-to-moderate struct access
-compiles. Remaining failures are from:
+With both fixes applied (stub injection + `#define static`/`inline`),
+expect ~52% attrition (48% survival) and `graphed` matching `compiled`.
+If you're seeing higher attrition, check:
 
-- **Deep pointer chains** (`avctx->priv_data->field`) where a stubbed int
-  member is used as a struct pointer — the injector doesn't yet upgrade
-  stub *members* to pointer types (only top-level int stubs get upgraded).
-- **Functions that were compiled with real project headers** (installed
-  via `ffmpeg-free-devel`) where the field was deprecated and removed in
-  newer FFmpeg. These fail with "no member named X in the real struct",
-  which the stub injector cannot fix. To avoid this, the stub injector
-  works without the real headers when possible.
-- **Complex macro dependencies** that expand to type names clang can't
-  resolve even with stubs.
+- **`graphed` much lower than `compiled`**: means the `#define static`
+  fix is not active. Verify you have the latest `preprocess.py` — the
+  end of `_PREAMBLE_STATIC` should contain `#define static` and
+  `#define inline`. Without this, clang silently omits `static`/`inline`
+  functions from the `.ll` output (no `define` lines, empty IR).
+- **`compiled` itself low**: remaining compile failures are from deep
+  pointer chains (`avctx->priv_data->field`) and complex macro
+  dependencies. These are expected; the 48% that do compile is enough
+  for ~8K training graphs on the full dataset.
 
-If attrition remains above 70%, the simplest fix is to run the full 27K
-dataset — even at 30% survival you get ~6,500 training graphs, which is
-enough for meaningful GNN training.
+If attrition remains above 70%, run the full 27K dataset — at 48%
+survival you get ~8K training graphs, well above the minimum for
+meaningful GNN training.
 
 **Three paths for near-zero attrition:**
 
