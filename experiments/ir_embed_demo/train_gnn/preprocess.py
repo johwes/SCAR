@@ -188,6 +188,11 @@ typedef unsigned long  ulong;
 #ifndef __uchar_defined
 typedef unsigned char  uchar;
 #endif
+/* generic pointer stub — used by the stub injector for deeply chained
+   member access (avctx->streams[i]->codec->...).  Member injection adds
+   fields here as they are discovered; self-referential pointer members
+   (struct _ptr_stub *f) are valid because _ptr_stub is already declared. */
+typedef struct _ptr_stub { char _pad[512]; } _ptr_stub;
 """
 
 PREAMBLE = (("\n".join(_PROJECT_INCLUDES) + "\n\n" + _PREAMBLE_STATIC)
@@ -199,7 +204,7 @@ _ERR_UNDECL_IDENT  = re.compile(r"error: use of undeclared identifier '(\w+)'")
 _ERR_IMPLICIT_FUNC = re.compile(r"warning: implicit declaration of function '(\w+)'")
 _ERR_INCOMPLETE    = re.compile(r"error: incomplete definition of type '(?:struct|union|enum) (\w+)'")
 _ERR_COMBINE       = re.compile(r"error: cannot combine with previous '(?:type-name|storage class)' declaration specifier")
-_ERR_MEMBER_ON_INT = re.compile(r"error: member reference (?:base )?type '(?:int|char)(?: \*+)?' is not (?:a structure or union|a pointer)")
+_ERR_MEMBER_ON_INT = re.compile(r"error: member reference (?:base )?type '(?:int|char|void)(?: \*+)?' is not (?:a structure or union|a pointer)")
 _ERR_NO_MEMBER     = re.compile(r"error: no member named '(\w+)' in '(?:struct |union )?(\w+)'")
 _ERR_INCOMPAT_INT  = re.compile(r"error: assigning to '(\w+)' \(aka 'struct \1'\) from incompatible type '(?:int|long|unsigned|void \*)'")
 _ERR_BINOP_INT     = re.compile(r"error: invalid operands to binary expression \('(\w+)' \(aka 'struct \1'\) and '(?:int|long|unsigned)'\)")
@@ -284,14 +289,24 @@ def _try_compile(full_source: str) -> tuple[str | None, str]:
 
 def _build_struct_stub(t: str, members: list[str],
                        fn_members: list[str] | None = None,
-                       ptr_members: list[str] | None = None) -> str:
-    """Padded struct stub with int, function-pointer, and void* pointer members."""
+                       ptr_members: list[str] | None = None,
+                       arr_members: list[str] | None = None) -> str:
+    """Padded struct stub.
+
+    members     → int fields
+    fn_members  → void* (*f)() function pointer fields
+    ptr_members → struct _ptr_stub * fields  (chain: m->field)
+    arr_members → struct _ptr_stub ** fields (subscript: m[i]->field)
+    """
     fn_members  = fn_members  or []
     ptr_members = ptr_members or []
-    decls  = "".join(f" int {m};"        for m in members
-                     if m not in fn_members and m not in ptr_members)
-    decls += "".join(f" void* (*{m})();" for m in fn_members)
-    decls += "".join(f" void *{m};"      for m in ptr_members)
+    arr_members = arr_members or []
+    arr_set     = set(arr_members)   # arr takes precedence over ptr
+    all_special = set(fn_members) | set(ptr_members) | arr_set
+    decls  = "".join(f" int {m};"                for m in members if m not in all_special)
+    decls += "".join(f" void* (*{m})();"         for m in fn_members)
+    decls += "".join(f" struct _ptr_stub *{m};"  for m in ptr_members if m not in arr_set)
+    decls += "".join(f" struct _ptr_stub **{m};" for m in arr_members)
     if decls:
         return f"typedef struct {t} {{{decls} char _pad[512]; }} {t};"
     return f"typedef struct {t} {{ char _pad[512]; }} {t};"
@@ -321,10 +336,12 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
     """
     preamble = PREAMBLE
     seen_stubs: set[str] = set()
-    struct_stubs: set[str] = set()
-    struct_members: dict[str, list[str]] = {}
-    struct_fn_members: dict[str, list[str]] = {}   # members that are fn ptrs, not ints
-    struct_ptr_members: dict[str, list[str]] = {}  # members that are void *, not ints
+    # Pre-register _ptr_stub so member injection can accumulate fields into it.
+    struct_stubs: set[str] = {"_ptr_stub"}
+    struct_members: dict[str, list[str]] = {"_ptr_stub": []}
+    struct_fn_members: dict[str, list[str]] = {}   # members that are fn ptrs
+    struct_ptr_members: dict[str, list[str]] = {}  # members typed struct _ptr_stub *
+    struct_arr_members: dict[str, list[str]] = {}  # members typed struct _ptr_stub **
 
     paid_attempts = 0   # only new_stubs additions count against the limit
     _last_stderr = ""
@@ -340,6 +357,7 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
         demote_to_const: set[str] = set()
         fn_member_upgrades: set[str] = set()
         ptr_member_upgrades: dict[str, list[str]] = {}
+        arr_member_upgrades: dict[str, list[str]] = {}
         int_stubs_upgraded = False
         new_member_injections: dict[str, list[str]] = {}
 
@@ -478,23 +496,23 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                             ptr_member_upgrades.setdefault(type_name, []).append(mem)
 
             # "subscripted value is not an array" — a member or var used with [i].
-            # Upgrade: top-level int stub → void * var; struct member → void * field.
-            # Scan source line directly; the caret points at the whole subscript
-            # expression base (e.g. avctx), not the member being indexed.
+            # Upgrade to struct _ptr_stub ** so m[i] returns _ptr_stub *, allowing
+            # further ->field access which member injection then handles.
             if _ERR_SUBSCRIPT.search(line):
                 src_line = lines[i + 1] if i + 1 < len(lines) else ""
                 for m_sub in re.finditer(r"\b(\w+)\s*\[", src_line):
                     mem = m_sub.group(1)
                     int_stub_v = f"static int {mem} = 0;"
                     if int_stub_v in preamble:
-                        preamble = preamble.replace(int_stub_v, f"static void *{mem} = 0;")
+                        preamble = preamble.replace(int_stub_v,
+                                                    f"static _ptr_stub **{mem};")
                         int_stubs_upgraded = True
                     else:
                         for type_name, type_members in struct_members.items():
                             if (mem in type_members and
                                     mem not in struct_fn_members.get(type_name, []) and
-                                    mem not in struct_ptr_members.get(type_name, [])):
-                                ptr_member_upgrades.setdefault(type_name, []).append(mem)
+                                    mem not in struct_arr_members.get(type_name, [])):
+                                arr_member_upgrades.setdefault(type_name, []).append(mem)
 
             # "expression is not an integer constant expression" — a static int
             # stub was used in a switch case label. C requires case values to be
@@ -550,7 +568,8 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
             for t in demote_to_macro:
                 old = _build_struct_stub(t, struct_members.get(t, []),
                                          struct_fn_members.get(t, []),
-                                         struct_ptr_members.get(t, []))
+                                         struct_ptr_members.get(t, []),
+                                         struct_arr_members.get(t, []))
                 preamble = preamble.replace(old, f"#define {t}", 1)
                 struct_stubs.discard(t)
             continue
@@ -559,7 +578,8 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
             for t in demote_to_int_type:
                 old = _build_struct_stub(t, struct_members.get(t, []),
                                          struct_fn_members.get(t, []),
-                                         struct_ptr_members.get(t, []))
+                                         struct_ptr_members.get(t, []),
+                                         struct_arr_members.get(t, []))
                 preamble = preamble.replace(old, f"typedef int {t};", 1)
                 struct_stubs.discard(t)
             continue
@@ -577,11 +597,13 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                             fn_mem not in struct_fn_members.get(type_name, [])):
                         old_stub = _build_struct_stub(type_name, members,
                                                       struct_fn_members.get(type_name, []),
-                                                      struct_ptr_members.get(type_name, []))
+                                                      struct_ptr_members.get(type_name, []),
+                                                      struct_arr_members.get(type_name, []))
                         struct_fn_members.setdefault(type_name, []).append(fn_mem)
                         new_stub = _build_struct_stub(type_name, members,
                                                       struct_fn_members[type_name],
-                                                      struct_ptr_members.get(type_name, []))
+                                                      struct_ptr_members.get(type_name, []),
+                                                      struct_arr_members.get(type_name, []))
                         preamble = preamble.replace(old_stub, new_stub, 1)
             continue
 
@@ -590,14 +612,34 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                 old_stub = _build_struct_stub(type_name,
                                               struct_members.get(type_name, []),
                                               struct_fn_members.get(type_name, []),
-                                              struct_ptr_members.get(type_name, []))
+                                              struct_ptr_members.get(type_name, []),
+                                              struct_arr_members.get(type_name, []))
                 for pm in ptr_mems:
                     if pm not in struct_ptr_members.get(type_name, []):
                         struct_ptr_members.setdefault(type_name, []).append(pm)
                 new_stub = _build_struct_stub(type_name,
                                               struct_members[type_name],
                                               struct_fn_members.get(type_name, []),
-                                              struct_ptr_members[type_name])
+                                              struct_ptr_members[type_name],
+                                              struct_arr_members.get(type_name, []))
+                preamble = preamble.replace(old_stub, new_stub, 1)
+            continue
+
+        if arr_member_upgrades:
+            for type_name, arr_mems in arr_member_upgrades.items():
+                old_stub = _build_struct_stub(type_name,
+                                              struct_members.get(type_name, []),
+                                              struct_fn_members.get(type_name, []),
+                                              struct_ptr_members.get(type_name, []),
+                                              struct_arr_members.get(type_name, []))
+                for am in arr_mems:
+                    if am not in struct_arr_members.get(type_name, []):
+                        struct_arr_members.setdefault(type_name, []).append(am)
+                new_stub = _build_struct_stub(type_name,
+                                              struct_members[type_name],
+                                              struct_fn_members.get(type_name, []),
+                                              struct_ptr_members.get(type_name, []),
+                                              struct_arr_members[type_name])
                 preamble = preamble.replace(old_stub, new_stub, 1)
             continue
 
@@ -605,11 +647,13 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
             for type_name, new_members in new_member_injections.items():
                 old_stub = _build_struct_stub(type_name, struct_members.get(type_name, []),
                                               struct_fn_members.get(type_name, []),
-                                              struct_ptr_members.get(type_name, []))
+                                              struct_ptr_members.get(type_name, []),
+                                              struct_arr_members.get(type_name, []))
                 struct_members.setdefault(type_name, []).extend(new_members)
                 new_stub = _build_struct_stub(type_name, struct_members[type_name],
                                               struct_fn_members.get(type_name, []),
-                                              struct_ptr_members.get(type_name, []))
+                                              struct_ptr_members.get(type_name, []),
+                                              struct_arr_members.get(type_name, []))
                 preamble = preamble.replace(old_stub, new_stub, 1)
             continue
 
@@ -885,10 +929,11 @@ def debug_one(jsonl_path: Path) -> None:
             else:
                 preamble = PREAMBLE
                 seen: set[str] = set()
-                struct_stubs: set[str] = set()
-                struct_members_d: dict[str, list[str]] = {}
+                struct_stubs: set[str] = {"_ptr_stub"}
+                struct_members_d: dict[str, list[str]] = {"_ptr_stub": []}
                 struct_fn_members_d: dict[str, list[str]] = {}
                 struct_ptr_members_d: dict[str, list[str]] = {}
+                struct_arr_members_d: dict[str, list[str]] = {}
                 for attempt in range(8):
                     ir2, stderr = _try_compile(preamble + "\n" + item["func"])
                     if ir2:
@@ -901,6 +946,7 @@ def debug_one(jsonl_path: Path) -> None:
                     demote_const_d: set[str] = set()
                     fn_upgrades: set[str] = set()
                     ptr_upgrades_d: dict[str, list[str]] = {}
+                    arr_upgrades_d: dict[str, list[str]] = {}
                     int_upgraded = False
                     new_members_d: dict[str, list[str]] = {}
                     src_lines = stderr.splitlines()
@@ -1004,16 +1050,16 @@ def debug_one(jsonl_path: Path) -> None:
                                 int_stub_s = f"static int {mem_s} = 0;"
                                 if int_stub_s in preamble:
                                     preamble = preamble.replace(int_stub_s,
-                                                                f"static void *{mem_s} = 0;")
-                                    print(f"  upgrading int stub → void*: {mem_s}")
+                                                                f"static _ptr_stub **{mem_s};")
+                                    print(f"  upgrading int stub → _ptr_stub**: {mem_s}")
                                     int_upgraded = True
                                 else:
                                     for tn, tm in struct_members_d.items():
                                         if (mem_s in tm and
                                                 mem_s not in struct_fn_members_d.get(tn, []) and
-                                                mem_s not in struct_ptr_members_d.get(tn, [])):
-                                            print(f"  upgrading struct member → void*: {tn}.{mem_s}")
-                                            ptr_upgrades_d.setdefault(tn, []).append(mem_s)
+                                                mem_s not in struct_arr_members_d.get(tn, [])):
+                                            print(f"  upgrading struct member → _ptr_stub**: {tn}.{mem_s}")
+                                            arr_upgrades_d.setdefault(tn, []).append(mem_s)
                         m = _ERR_NO_MEMBER.search(err_line)
                         if m:
                             member_name, type_name = m.group(1), m.group(2)
@@ -1054,7 +1100,8 @@ def debug_one(jsonl_path: Path) -> None:
                         for t in demote:
                             old = _build_struct_stub(t, struct_members_d.get(t, []),
                                                      struct_fn_members_d.get(t, []),
-                                                     struct_ptr_members_d.get(t, []))
+                                                     struct_ptr_members_d.get(t, []),
+                                                     struct_arr_members_d.get(t, []))
                             preamble = preamble.replace(old, f"#define {t}", 1)
                             struct_stubs.discard(t)
                         continue
@@ -1063,7 +1110,8 @@ def debug_one(jsonl_path: Path) -> None:
                         for t in demote_int:
                             old = _build_struct_stub(t, struct_members_d.get(t, []),
                                                      struct_fn_members_d.get(t, []),
-                                                     struct_ptr_members_d.get(t, []))
+                                                     struct_ptr_members_d.get(t, []),
+                                                     struct_arr_members_d.get(t, []))
                             preamble = preamble.replace(old, f"typedef int {t};", 1)
                             struct_stubs.discard(t)
                         continue
@@ -1081,28 +1129,50 @@ def debug_one(jsonl_path: Path) -> None:
                                     old_stub = _build_struct_stub(
                                         type_name, members,
                                         struct_fn_members_d.get(type_name, []),
-                                        struct_ptr_members_d.get(type_name, []))
+                                        struct_ptr_members_d.get(type_name, []),
+                                        struct_arr_members_d.get(type_name, []))
                                     struct_fn_members_d.setdefault(type_name, []).append(fn_mem)
                                     new_stub = _build_struct_stub(
                                         type_name, members,
                                         struct_fn_members_d[type_name],
-                                        struct_ptr_members_d.get(type_name, []))
+                                        struct_ptr_members_d.get(type_name, []),
+                                        struct_arr_members_d.get(type_name, []))
                                     preamble = preamble.replace(old_stub, new_stub, 1)
                         continue
                     if ptr_upgrades_d:
-                        print(f"  upgrading int members → void*: { {k: v for k, v in ptr_upgrades_d.items()} }")
+                        print(f"  upgrading members → _ptr_stub*: { {k: v for k, v in ptr_upgrades_d.items()} }")
                         for type_name, ptr_mems in ptr_upgrades_d.items():
                             old_stub = _build_struct_stub(type_name,
                                                           struct_members_d.get(type_name, []),
                                                           struct_fn_members_d.get(type_name, []),
-                                                          struct_ptr_members_d.get(type_name, []))
+                                                          struct_ptr_members_d.get(type_name, []),
+                                                          struct_arr_members_d.get(type_name, []))
                             for pm in ptr_mems:
                                 if pm not in struct_ptr_members_d.get(type_name, []):
                                     struct_ptr_members_d.setdefault(type_name, []).append(pm)
                             new_stub = _build_struct_stub(type_name,
                                                           struct_members_d[type_name],
                                                           struct_fn_members_d.get(type_name, []),
-                                                          struct_ptr_members_d[type_name])
+                                                          struct_ptr_members_d[type_name],
+                                                          struct_arr_members_d.get(type_name, []))
+                            preamble = preamble.replace(old_stub, new_stub, 1)
+                        continue
+                    if arr_upgrades_d:
+                        print(f"  upgrading members → _ptr_stub**: { {k: v for k, v in arr_upgrades_d.items()} }")
+                        for type_name, arr_mems in arr_upgrades_d.items():
+                            old_stub = _build_struct_stub(type_name,
+                                                          struct_members_d.get(type_name, []),
+                                                          struct_fn_members_d.get(type_name, []),
+                                                          struct_ptr_members_d.get(type_name, []),
+                                                          struct_arr_members_d.get(type_name, []))
+                            for am in arr_mems:
+                                if am not in struct_arr_members_d.get(type_name, []):
+                                    struct_arr_members_d.setdefault(type_name, []).append(am)
+                            new_stub = _build_struct_stub(type_name,
+                                                          struct_members_d[type_name],
+                                                          struct_fn_members_d.get(type_name, []),
+                                                          struct_ptr_members_d.get(type_name, []),
+                                                          struct_arr_members_d[type_name])
                             preamble = preamble.replace(old_stub, new_stub, 1)
                         continue
                     if new_members_d:
@@ -1111,12 +1181,14 @@ def debug_one(jsonl_path: Path) -> None:
                             old_stub = _build_struct_stub(type_name,
                                                           struct_members_d.get(type_name, []),
                                                           struct_fn_members_d.get(type_name, []),
-                                                          struct_ptr_members_d.get(type_name, []))
+                                                          struct_ptr_members_d.get(type_name, []),
+                                                          struct_arr_members_d.get(type_name, []))
                             struct_members_d.setdefault(type_name, []).extend(new_m)
                             new_stub = _build_struct_stub(type_name,
                                                           struct_members_d[type_name],
                                                           struct_fn_members_d.get(type_name, []),
-                                                          struct_ptr_members_d.get(type_name, []))
+                                                          struct_ptr_members_d.get(type_name, []),
+                                                          struct_arr_members_d.get(type_name, []))
                             preamble = preamble.replace(old_stub, new_stub, 1)
                         continue
                     if int_upgraded:
