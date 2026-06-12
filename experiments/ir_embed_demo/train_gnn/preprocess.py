@@ -344,6 +344,7 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
     struct_arr_members: dict[str, list[str]] = {}  # members typed struct _ptr_stub **
 
     paid_attempts = 0   # only new_stubs additions count against the limit
+    macro_counter = 1   # unique values for #define case-label constants
     _last_stderr = ""
     for _ in range(max_retries):
         ir, stderr = _try_compile(preamble + "\n" + func_source)
@@ -496,17 +497,29 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                             ptr_member_upgrades.setdefault(type_name, []).append(mem)
 
             # "subscripted value is not an array" — a member or var used with [i].
-            # Upgrade to struct _ptr_stub ** so m[i] returns _ptr_stub *, allowing
-            # further ->field access which member injection then handles.
+            # For top-level int stubs: upgrade to unique _struct_mem *mem so that
+            # mem[i] returns _struct_mem (value), making mem[i].field trigger
+            # "no member named" which member injection handles.  Using a unique
+            # per-variable struct avoids the shared _ptr_stub collision where
+            # mem[i].field would see _ptr_stub * (pointer) and fail with
+            # "not a structure or union" instead.
+            # For struct members: upgrade to _ptr_stub** so m[i] returns _ptr_stub *,
+            # allowing subsequent ->field member injection.
             if _ERR_SUBSCRIPT.search(line):
                 src_line = lines[i + 1] if i + 1 < len(lines) else ""
                 for m_sub in re.finditer(r"\b(\w+)\s*\[", src_line):
                     mem = m_sub.group(1)
                     int_stub_v = f"static int {mem} = 0;"
                     if int_stub_v in preamble:
-                        preamble = preamble.replace(int_stub_v,
-                                                    f"static _ptr_stub **{mem};")
-                        int_stubs_upgraded = True
+                        struct_name = f"_struct_{mem}"
+                        if struct_name not in struct_stubs:
+                            typedef_stub = _build_struct_stub(struct_name, [])
+                            var_decl = f"static {struct_name} *{mem} = 0;"
+                            preamble = preamble.replace(int_stub_v,
+                                                        typedef_stub + "\n" + var_decl)
+                            struct_stubs.add(struct_name)
+                            struct_members[struct_name] = []
+                            int_stubs_upgraded = True
                     else:
                         for type_name, type_members in struct_members.items():
                             if (mem in type_members and
@@ -587,7 +600,8 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
         if demote_to_const:
             for sym in demote_to_const:
                 preamble = preamble.replace(f"static int {sym} = 0;",
-                                            f"#define {sym} 0", 1)
+                                            f"#define {sym} {macro_counter}", 1)
+                macro_counter += 1
             continue
 
         if fn_member_upgrades:
@@ -934,6 +948,7 @@ def debug_one(jsonl_path: Path) -> None:
                 struct_fn_members_d: dict[str, list[str]] = {}
                 struct_ptr_members_d: dict[str, list[str]] = {}
                 struct_arr_members_d: dict[str, list[str]] = {}
+                macro_counter_d = 1
                 for attempt in range(8):
                     ir2, stderr = _try_compile(preamble + "\n" + item["func"])
                     if ir2:
@@ -1049,10 +1064,16 @@ def debug_one(jsonl_path: Path) -> None:
                                 mem_s = m_sub.group(1)
                                 int_stub_s = f"static int {mem_s} = 0;"
                                 if int_stub_s in preamble:
-                                    preamble = preamble.replace(int_stub_s,
-                                                                f"static _ptr_stub **{mem_s};")
-                                    print(f"  upgrading int stub → _ptr_stub**: {mem_s}")
-                                    int_upgraded = True
+                                    sn_s = f"_struct_{mem_s}"
+                                    if sn_s not in struct_stubs:
+                                        td_s = _build_struct_stub(sn_s, [])
+                                        vd_s = f"static {sn_s} *{mem_s} = 0;"
+                                        preamble = preamble.replace(int_stub_s,
+                                                                    td_s + "\n" + vd_s)
+                                        struct_stubs.add(sn_s)
+                                        struct_members_d[sn_s] = []
+                                        print(f"  upgrading int stub → unique struct*: {mem_s} ({sn_s})")
+                                        int_upgraded = True
                                 else:
                                     for tn, tm in struct_members_d.items():
                                         if (mem_s in tm and
@@ -1118,7 +1139,8 @@ def debug_one(jsonl_path: Path) -> None:
                     if demote_const_d:
                         for sym in demote_const_d:
                             preamble = preamble.replace(f"static int {sym} = 0;",
-                                                        f"#define {sym} 0", 1)
+                                                        f"#define {sym} {macro_counter_d}", 1)
+                            macro_counter_d += 1
                         continue
                     if fn_upgrades:
                         print(f"  upgrading int members → fn ptrs: {fn_upgrades}")
