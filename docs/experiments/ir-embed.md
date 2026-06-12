@@ -305,6 +305,10 @@ patches to specialise to SCAR's encountered patterns.
 
 ### 4b. ProGraML + Devign — structural graph model on LLVM IR
 
+> **AWS training setup:** see `docs/experiments/ir-embed-aws.md` for
+> instance selection, environment setup, and a cost estimate (~$3–4 total).
+
+
 This is the theoretically correct path for SCAR's use case. It operates
 on the same LLVM IR that SCAR's `build-bitcode` task already produces,
 normalising away all surface noise and capturing actual control and data
