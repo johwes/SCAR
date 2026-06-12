@@ -451,7 +451,6 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
             # that "t.field" and "t->field" remain valid C expressions.
             if _ERR_MEMBER_ON_INT.search(line):
                 src_line = lines[i + 1] if i + 1 < len(lines) else ""
-                car_line = lines[i + 2] if i + 2 < len(lines) else ""
                 for t in list(seen_stubs):
                     int_stub = f"static int {t} = 0;"
                     # Only upgrade if t is the BASE of a member access (t. or t->),
@@ -467,44 +466,35 @@ def compile_to_ir(func_source: str, max_retries: int = 12,
                         struct_stubs.add(struct_name)
                         struct_members[struct_name] = []
                         int_stubs_upgraded = True
-                # Also handle: caret points at a struct MEMBER that is int but
-                # used as struct or pointer (e.g. avctx->priv_data->field).
-                pp = car_line.find("|"); cp = car_line.find("^")
-                if pp >= 0 and cp > pp:
-                    off = cp - pp - 1
-                    src = src_line[pp + 1:] if pp < len(src_line) else ""
-                    mid = re.match(r"\w+", src[off:]) if off < len(src) else None
-                    if mid:
-                        mem = mid.group(0)
+                # Scan source line for identifiers used as struct/pointer that
+                # are injected int members — caret position is unreliable here
+                # (clang may point at the base expression, not the member).
+                for m_acc in re.finditer(r"\b(\w+)\s*(?:\.|->)", src_line):
+                    mem = m_acc.group(1)
+                    for type_name, type_members in struct_members.items():
+                        if (mem in type_members and
+                                mem not in struct_fn_members.get(type_name, []) and
+                                mem not in struct_ptr_members.get(type_name, [])):
+                            ptr_member_upgrades.setdefault(type_name, []).append(mem)
+
+            # "subscripted value is not an array" — a member or var used with [i].
+            # Upgrade: top-level int stub → void * var; struct member → void * field.
+            # Scan source line directly; the caret points at the whole subscript
+            # expression base (e.g. avctx), not the member being indexed.
+            if _ERR_SUBSCRIPT.search(line):
+                src_line = lines[i + 1] if i + 1 < len(lines) else ""
+                for m_sub in re.finditer(r"\b(\w+)\s*\[", src_line):
+                    mem = m_sub.group(1)
+                    int_stub_v = f"static int {mem} = 0;"
+                    if int_stub_v in preamble:
+                        preamble = preamble.replace(int_stub_v, f"static void *{mem} = 0;")
+                        int_stubs_upgraded = True
+                    else:
                         for type_name, type_members in struct_members.items():
                             if (mem in type_members and
                                     mem not in struct_fn_members.get(type_name, []) and
                                     mem not in struct_ptr_members.get(type_name, [])):
                                 ptr_member_upgrades.setdefault(type_name, []).append(mem)
-
-            # "subscripted value is not an array" — a member or var used with [i].
-            # Upgrade: top-level int stub → void * var; struct member → void * field.
-            if _ERR_SUBSCRIPT.search(line):
-                src_line = lines[i + 1] if i + 1 < len(lines) else ""
-                car_line = lines[i + 2] if i + 2 < len(lines) else ""
-                pp = car_line.find("|"); cp = car_line.find("^")
-                if pp >= 0 and cp > pp:
-                    off = cp - pp - 1
-                    src = src_line[pp + 1:] if pp < len(src_line) else ""
-                    mid = re.match(r"\w+", src[off:]) if off < len(src) else None
-                    if mid:
-                        mem = mid.group(0)
-                        int_stub_v = f"static int {mem} = 0;"
-                        if int_stub_v in preamble:
-                            preamble = preamble.replace(int_stub_v,
-                                                        f"static void *{mem} = 0;")
-                            int_stubs_upgraded = True
-                        else:
-                            for type_name, type_members in struct_members.items():
-                                if (mem in type_members and
-                                        mem not in struct_fn_members.get(type_name, []) and
-                                        mem not in struct_ptr_members.get(type_name, [])):
-                                    ptr_member_upgrades.setdefault(type_name, []).append(mem)
 
             # "expression is not an integer constant expression" — a static int
             # stub was used in a switch case label. C requires case values to be
@@ -985,7 +975,6 @@ def debug_one(jsonl_path: Path) -> None:
                                         demote.add(t)
                         if _ERR_MEMBER_ON_INT.search(err_line):
                             src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
-                            car_line = src_lines[i + 2] if i + 2 < len(src_lines) else ""
                             for t in list(seen):
                                 int_stub = f"static int {t} = 0;"
                                 if (int_stub in preamble and
@@ -1000,42 +989,31 @@ def debug_one(jsonl_path: Path) -> None:
                                     struct_members_d[sn] = []
                                     int_upgraded = True
                                     print(f"  upgrading int stub → struct var: {t} (type {sn})")
-                            pp_d = car_line.find("|"); cp_d = car_line.find("^")
-                            if pp_d >= 0 and cp_d > pp_d:
-                                off_d = cp_d - pp_d - 1
-                                src_d = src_line[pp_d + 1:] if pp_d < len(src_line) else ""
-                                mid_d = re.match(r"\w+", src_d[off_d:]) if off_d < len(src_d) else None
-                                if mid_d:
-                                    mem_d = mid_d.group(0)
-                                    for tn, tm in struct_members_d.items():
-                                        if (mem_d in tm and
-                                                mem_d not in struct_fn_members_d.get(tn, []) and
-                                                mem_d not in struct_ptr_members_d.get(tn, [])):
-                                            print(f"  upgrading struct member → void*: {tn}.{mem_d}")
-                                            ptr_upgrades_d.setdefault(tn, []).append(mem_d)
+                            for m_acc in re.finditer(r"\b(\w+)\s*(?:\.|->)", src_line):
+                                mem_d = m_acc.group(1)
+                                for tn, tm in struct_members_d.items():
+                                    if (mem_d in tm and
+                                            mem_d not in struct_fn_members_d.get(tn, []) and
+                                            mem_d not in struct_ptr_members_d.get(tn, [])):
+                                        print(f"  upgrading struct member → void*: {tn}.{mem_d}")
+                                        ptr_upgrades_d.setdefault(tn, []).append(mem_d)
                         if _ERR_SUBSCRIPT.search(err_line):
                             src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
-                            car_line = src_lines[i + 2] if i + 2 < len(src_lines) else ""
-                            pp_s = car_line.find("|"); cp_s = car_line.find("^")
-                            if pp_s >= 0 and cp_s > pp_s:
-                                off_s = cp_s - pp_s - 1
-                                src_s = src_line[pp_s + 1:] if pp_s < len(src_line) else ""
-                                mid_s = re.match(r"\w+", src_s[off_s:]) if off_s < len(src_s) else None
-                                if mid_s:
-                                    mem_s = mid_s.group(0)
-                                    int_stub_s = f"static int {mem_s} = 0;"
-                                    if int_stub_s in preamble:
-                                        preamble = preamble.replace(int_stub_s,
-                                                                    f"static void *{mem_s} = 0;")
-                                        print(f"  upgrading int stub → void*: {mem_s}")
-                                        int_upgraded = True
-                                    else:
-                                        for tn, tm in struct_members_d.items():
-                                            if (mem_s in tm and
-                                                    mem_s not in struct_fn_members_d.get(tn, []) and
-                                                    mem_s not in struct_ptr_members_d.get(tn, [])):
-                                                print(f"  upgrading struct member → void*: {tn}.{mem_s}")
-                                                ptr_upgrades_d.setdefault(tn, []).append(mem_s)
+                            for m_sub in re.finditer(r"\b(\w+)\s*\[", src_line):
+                                mem_s = m_sub.group(1)
+                                int_stub_s = f"static int {mem_s} = 0;"
+                                if int_stub_s in preamble:
+                                    preamble = preamble.replace(int_stub_s,
+                                                                f"static void *{mem_s} = 0;")
+                                    print(f"  upgrading int stub → void*: {mem_s}")
+                                    int_upgraded = True
+                                else:
+                                    for tn, tm in struct_members_d.items():
+                                        if (mem_s in tm and
+                                                mem_s not in struct_fn_members_d.get(tn, []) and
+                                                mem_s not in struct_ptr_members_d.get(tn, [])):
+                                            print(f"  upgrading struct member → void*: {tn}.{mem_s}")
+                                            ptr_upgrades_d.setdefault(tn, []).append(mem_s)
                         m = _ERR_NO_MEMBER.search(err_line)
                         if m:
                             member_name, type_name = m.group(1), m.group(2)
