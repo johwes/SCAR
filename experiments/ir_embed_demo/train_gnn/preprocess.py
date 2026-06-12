@@ -260,15 +260,32 @@ def compile_to_ir(func_source: str, max_retries: int = 6) -> str | None:
 
             # "cannot combine with previous 'type-name'" means a name we
             # stubbed as a struct type is being used as a qualifier (e.g.
-            # "static av_cold int func").  Find which struct stub appears
-            # on the error source line (printed one line after the error)
-            # and convert it from a struct typedef to a no-op macro.
+            # "static av_cold int func").
+            # clang format:
+            #   i+0: file:line:col: error: cannot combine ...
+            #   i+1:   108 | static av_cold int func(...)
+            #   i+2:       |                ^           ← caret at the NEW type
+            # Only demote struct stubs that appear BEFORE the caret — the
+            # offending qualifier precedes the token clang points at.
             if _ERR_COMBINE.search(line):
-                # clang format: error line, then "  NN | <source>", then caret
-                src_line = lines[i + 1] if i + 1 < len(lines) else ""
-                for t in list(struct_stubs):
-                    if re.search(r"\b" + re.escape(t) + r"\b", src_line):
-                        demote_to_macro.add(t)
+                src_line   = lines[i + 1] if i + 1 < len(lines) else ""
+                caret_line = lines[i + 2] if i + 2 < len(lines) else ""
+                pipe_pos   = caret_line.find("|")
+                caret_pos  = caret_line.find("^")
+                if pipe_pos >= 0 and caret_pos > pipe_pos:
+                    # offset of the error token within the source content
+                    error_offset = caret_pos - pipe_pos - 1
+                    # source content starts right after the "| " separator
+                    src_content = src_line[pipe_pos + 1:] if pipe_pos < len(src_line) else src_line
+                    for t in list(struct_stubs):
+                        m = re.search(r"\b" + re.escape(t) + r"\b", src_content)
+                        if m and m.start() < error_offset:
+                            demote_to_macro.add(t)
+                else:
+                    # fallback: demote any struct stub on the line
+                    for t in list(struct_stubs):
+                        if re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                            demote_to_macro.add(t)
 
             # "member reference ... type 'int' is not a pointer/struct" means
             # a name was stubbed as `static int t = 0` but is actually used
@@ -504,10 +521,21 @@ def debug_one(jsonl_path: Path) -> None:
                                 new_stubs.append(f"struct {t} {{}};")
                                 seen.add(stub)
                         if _ERR_COMBINE.search(err_line):
-                            src_line = src_lines[i + 1] if i + 1 < len(src_lines) else ""
-                            for t in list(struct_stubs):
-                                if re.search(r"\b" + re.escape(t) + r"\b", src_line):
-                                    demote.add(t)
+                            src_line   = src_lines[i + 1] if i + 1 < len(src_lines) else ""
+                            caret_line = src_lines[i + 2] if i + 2 < len(src_lines) else ""
+                            pipe_pos   = caret_line.find("|")
+                            caret_pos  = caret_line.find("^")
+                            if pipe_pos >= 0 and caret_pos > pipe_pos:
+                                error_offset = caret_pos - pipe_pos - 1
+                                src_content  = src_line[pipe_pos + 1:] if pipe_pos < len(src_line) else src_line
+                                for t in list(struct_stubs):
+                                    m = re.search(r"\b" + re.escape(t) + r"\b", src_content)
+                                    if m and m.start() < error_offset:
+                                        demote.add(t)
+                            else:
+                                for t in list(struct_stubs):
+                                    if re.search(r"\b" + re.escape(t) + r"\b", src_line):
+                                        demote.add(t)
                     if demote:
                         print(f"  demoting to macro: {demote}")
                         for t in demote:
