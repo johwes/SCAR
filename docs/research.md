@@ -72,6 +72,48 @@ periodically on accumulated pairs becomes progressively more accurate on the
 patterns SCAR encounters. This is the part worth getting excited about: the
 repair pipeline and the detection model improve together.
 
+**Experimental findings** *(experiments/ir_embed_demo, 5 pairs, hand-written IR)*
+
+The hello-world demo uses normalized opcode-frequency histograms (no neural
+network, no training) over hand-written representative LLVM IR for five
+vulnerable/fixed pairs from `johwes/SCAR-test-c`.
+
+*The global metric is misleading.* Averaging cosine distances across all pairs
+gives a 1.02× cross-vs-within ratio — nearly no signal. But this is an
+artefact of the evaluation design: different vulnerability types (divzero vs
+nullderef) are naturally far apart because they are structurally different
+programs. Mixing cross-CWE distances into "within-class" collapses the signal.
+
+*The correct metric for a scanner is per-pair.* Given a new function's
+embedding, the question is: is it closer to known-vulnerable embeddings than to
+known-fixed embeddings? Measured this way, 4 of 5 pairs show a clear signal
+even with raw opcode histograms and zero training.
+
+*Vulnerability-class clustering is the most interesting finding.* 
+`nullderef_V ↔ oob_read_V = 0.081` — two completely different programs, but
+both are "missing a conditional branch" vulnerabilities. They sit closer
+together in the embedding space than either does to its own fixed version
+(0.314 and 0.368 respectively). The histogram naturally groups code by *what
+structural feature is absent* rather than by specific CWE identifier. This
+generalisation property is exactly what a scanner needs: train on one
+missing-branch pattern, detect others.
+
+*The one failure is informative.* `oob_read` failed because `nullderef_fixed`
+and `oob_read_fixed` are structurally nearly identical — both add an
+`icmp + br`. When two fixes have the same IR shape, the cross-class distance
+drops to the level of the within-pair distance and the signal disappears. This
+directly confirms the granularity concern: whole-function opcode histograms
+cannot distinguish *which* missing branch matters when multiple functions share
+the same fix topology. Subgraph-level or basic-block-level features would
+localise the difference.
+
+*What the experiment confirms and what it does not.* It confirms that a
+structural signal exists in opcode histograms on toy single-function examples.
+It does not test whether the signal survives on real-world functions (where the
+vulnerable pattern is buried in 200 lines of surrounding code), and it does not
+test whether contrastive training improves discriminability over raw histograms.
+Those are the two experiments that should follow.
+
 **Open questions**
 
 - *Granularity*: whole-function embeddings may be too coarse. A missing check
