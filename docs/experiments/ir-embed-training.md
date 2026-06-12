@@ -78,9 +78,20 @@ What it does:
 4. Parses the LLVM IR to extract a CFG graph with node features
 5. Saves pickled graph lists to `data/*_graphs.pkl`
 
-**Expected compile attrition:** ~20–40% of Devign functions reference
-project-specific types or macros that the stub headers don't cover.
-This is normal — the dataset is large enough to absorb it.
+**Expected compile attrition:** 40–70% of Devign functions reference
+project-specific types or macros that the stub headers cannot cover (struct
+member access on AVCodecContext, sk_buff, CPUState, etc. requires the
+actual project headers). This is normal — the dataset is large enough to
+absorb it, and the distribution of which functions succeed is close to
+random with respect to the vulnerability label.
+
+**Attrition varies by project:** Devign mixes FFmpeg, QEMU, Linux kernel,
+and LibTIFF. FFmpeg codec functions have very high attrition (~90%) because
+they access many AVCodecContext members. LibTIFF and simpler utility
+functions compile at much higher rates. The `--subset` flag now uses a
+random balanced sample across the full file rather than taking the first N
+functions, so you see representative attrition rather than a worst-case
+FFmpeg-only sample.
 
 **Parallel workers:** default is 4. Increase on AWS:
 ```bash

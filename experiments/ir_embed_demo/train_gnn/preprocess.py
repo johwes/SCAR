@@ -6,14 +6,16 @@ Run once before training. Outputs pickled graph lists under data/.
 
 Usage:
     python preprocess.py                   # full dataset (~27K functions)
-    python preprocess.py --subset 1000     # quick laptop test
+    python preprocess.py --subset 1000     # quick laptop test (random balanced sample)
     python preprocess.py --workers 8       # parallel compilation (default: 4)
+    python preprocess.py --seed 0          # different random subset sample
 """
 
 import argparse
 import json
 import os
 import pickle
+import random
 import re
 import subprocess
 import sys
@@ -444,15 +446,20 @@ def process_item(item: dict) -> dict | None:
     return g
 
 
-def process_split(jsonl_path: Path, subset: int | None, workers: int) -> list[dict]:
+def process_split(jsonl_path: Path, subset: int | None, workers: int,
+                  seed: int = 42) -> list[dict]:
     with open(jsonl_path) as f:
         items = [json.loads(l) for l in f]
 
     if subset:
-        # Keep class balance in the subset
-        vuln  = [x for x in items if x["target"] == 1][:subset // 2]
-        fixed = [x for x in items if x["target"] == 0][:subset // 2]
-        items = vuln + fixed
+        # Random balanced sample so we get a mix of all projects (FFmpeg, QEMU,
+        # Linux, LibTIFF) rather than just the first project in the file.
+        rng = random.Random(seed)
+        vuln  = [x for x in items if x["target"] == 1]
+        fixed = [x for x in items if x["target"] == 0]
+        rng.shuffle(vuln)
+        rng.shuffle(fixed)
+        items = vuln[:subset // 2] + fixed[:subset // 2]
 
     graphs, ok, fail = [], 0, 0
     print(f"  Processing {len(items)} functions with {workers} workers ...")
@@ -575,6 +582,8 @@ def main():
                     help="Use only N examples per split (laptop test)")
     ap.add_argument("--workers", type=int, default=4,
                     help="Parallel compilation workers")
+    ap.add_argument("--seed",    type=int, default=42,
+                    help="Random seed for subset sampling (default: 42)")
     ap.add_argument("--skip-download", action="store_true",
                     help="Skip download if data/*.jsonl already exist")
     ap.add_argument("--debug", action="store_true",
@@ -601,7 +610,8 @@ def main():
             print(f"Missing {src} — run without --skip-download first.")
             sys.exit(1)
         print(f"\n── {split} ───────────────────────────────────────────────")
-        graphs = process_split(src, subset=args.subset, workers=args.workers)
+        graphs = process_split(src, subset=args.subset, workers=args.workers,
+                               seed=args.seed)
         with open(dst, "wb") as f:
             pickle.dump(graphs, f)
         print(f"  Saved {len(graphs)} graphs → {dst}")
