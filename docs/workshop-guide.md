@@ -238,13 +238,17 @@ Your instructor will provide the dashboard URL.
 
 ### Scoring
 
-| Achievement | Points |
-|---|---|
-| Each accepted patch (VALID, confidence ≥ 0.6) | 10 pts |
-| Each unique tool added to the pipeline | 15 pts |
-| Accepted patch from a tool your team wired in | 25 pts |
-| Highest triage confidence score across all teams | 10 pts bonus |
-| Finding accepted that no other team found | 20 pts bonus |
+```
+score = (accepted patches × 3) + (unique CWEs × 2) + (tool diversity × 1)
+```
+
+| Dimension | What it measures | Multiplier |
+|---|---|---|
+| Accepted patches | Patches with verdict VALID and confidence ≥ 0.6 | × 3 |
+| Unique CWEs | Distinct CWE identifiers across all accepted patches | × 2 |
+| Tool diversity | Number of distinct analysis tools that contributed an accepted patch | × 1 |
+
+Tiebreaker: fastest wall-clock pipeline run time.
 
 ### Starting point: Add Semgrep (guided)
 
