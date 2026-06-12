@@ -707,31 +707,42 @@ _TRACKED_OPS = ["call", "store", "load", "icmp", "alloca",
 
 def _parse_ir(ir_text: str) -> list[dict]:
     """
-    Parse the first function in an IR file.
+    Parse the LAST function defined in an IR file (the user's function).
+
+    With project headers included, the compiled IR contains many inline helper
+    functions defined before the user's function.  We collect all functions and
+    return the last one's blocks — the user's function is always last because
+    the preamble (with headers) is prepended before the user's source code.
+
     Returns a list of basic-block dicts:
-      { name, lines, successors, predecessors, defs, uses }
+      { name, lines, successors }
     """
-    in_func   = False
-    blocks    = []
-    current   = None
+    in_func:    bool            = False
+    cur_blocks: list[dict]      = []
+    all_funcs:  list[list[dict]] = []
+    current:    dict | None     = None
 
     for line in ir_text.splitlines():
         if re.match(r"^define\b", line):
-            in_func  = True
-            current  = {"name": "entry", "lines": [], "successors": []}
-            blocks   = [current]
+            in_func   = True
+            current   = {"name": "entry", "lines": [], "successors": []}
+            cur_blocks = [current]
             continue
 
         if not in_func:
             continue
 
         if line.strip() == "}":
-            break
+            all_funcs.append(cur_blocks)
+            in_func   = False
+            cur_blocks = []
+            current   = None
+            continue
 
         m = _BB_LABEL.match(line)
         if m:
             current = {"name": m.group(1), "lines": [], "successors": []}
-            blocks.append(current)
+            cur_blocks.append(current)
             continue
 
         if current is None:
@@ -747,7 +758,7 @@ def _parse_ir(ir_text: str) -> list[dict]:
             if m:
                 current["successors"].append(m.group(1))
 
-    return blocks
+    return all_funcs[-1] if all_funcs else []
 
 
 def ir_to_graph(ir_text: str) -> dict | None:
