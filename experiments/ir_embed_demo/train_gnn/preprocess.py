@@ -28,7 +28,7 @@ HERE    = Path(__file__).parent
 DATA    = HERE / "data"
 DEVIGN_ID = "1x6hoF7G-tSYxg8AFybggypLZgMGDNHfF"   # Google Drive file ID
 
-# Common headers prepended to every function so type references resolve
+# Base preamble: standard headers + common primitive typedefs
 PREAMBLE = """\
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +38,44 @@ PREAMBLE = """\
 #include <stddef.h>
 #include <limits.h>
 #include <assert.h>
+#include <stdarg.h>
+#include <errno.h>
+#include <sys/types.h>
+
+/* suppress GCC/clang extensions that confuse a plain compile */
+#define __attribute__(x)
+#define __extension__
+#define __inline__ inline
+#define __volatile__ volatile
+#define __asm__(x)
+#define __builtin_expect(x,y) (x)
+#define likely(x)   (x)
+#define unlikely(x) (x)
+#define __must_check
+#define __user
+#define __iomem
+#define __force
+#define __rcu
+#define __percpu
+#define __init
+#define __exit
+#define noinline
+#define __always_inline inline
+#define EXPORT_SYMBOL(x)
+#define EXPORT_SYMBOL_GPL(x)
+#define MODULE_LICENSE(x)
+#define MODULE_AUTHOR(x)
+#define MODULE_DESCRIPTION(x)
+#define BUG()           ((void)0)
+#define BUG_ON(x)       ((void)(x))
+#define WARN_ON(x)      ((void)(x))
+#define BUILD_BUG_ON(x) ((void)(x))
+#define container_of(ptr,type,member) ((type*)((char*)(ptr) - offsetof(type,member)))
+#define ARRAY_SIZE(x)   (sizeof(x)/sizeof((x)[0]))
+#define min(a,b)        ((a)<(b)?(a):(b))
+#define max(a,b)        ((a)>(b)?(a):(b))
+#define DIV_ROUND_UP(n,d) (((n)+(d)-1)/(d))
+
 typedef unsigned int        uint;
 typedef unsigned long       ulong;
 typedef unsigned char       uchar;
@@ -46,7 +84,31 @@ typedef unsigned long long  u64;
 typedef unsigned int        u32;
 typedef unsigned short      u16;
 typedef unsigned char       u8;
+typedef signed char         s8;
+typedef int                 s32;
+typedef short               s16;
+typedef u64                 __u64;
+typedef u32                 __u32;
+typedef u16                 __u16;
+typedef u8                  __u8;
+typedef s64                 __s64;
+typedef s32                 __s32;
+typedef unsigned long       size_t;
+typedef long                ssize_t;
+typedef long                off_t;
+typedef int                 pid_t;
+typedef unsigned int        uid_t;
+typedef unsigned int        gid_t;
+typedef unsigned int        mode_t;
+typedef unsigned long       ino_t;
+typedef int                 dev_t;
 """
+
+# Regexes to detect fixable clang errors and extract the symbol name
+_ERR_UNKNOWN_TYPE  = re.compile(r"error: unknown type name '(\w+)'")
+_ERR_UNDECL_IDENT  = re.compile(r"error: use of undeclared identifier '(\w+)'")
+_ERR_IMPLICIT_FUNC = re.compile(r"warning: implicit declaration of function '(\w+)'")
+_ERR_INCOMPLETE    = re.compile(r"error: incomplete definition of type '(?:struct|union|enum) (\w+)'")
 
 # ---------------------------------------------------------------------------
 # Step 1 — Download + split Devign
@@ -86,32 +148,94 @@ def download_devign():
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Compile C function to LLVM IR
+# Step 2 — Compile C function to LLVM IR (with automatic stub injection)
 # ---------------------------------------------------------------------------
 
-def compile_to_ir(func_source: str) -> str | None:
-    """Compile one C function string to LLVM IR text. Returns None on failure."""
-    src = PREAMBLE + "\n" + func_source
+def _try_compile(full_source: str) -> tuple[str | None, str]:
+    """Single compilation attempt. Returns (ir_text_or_None, stderr)."""
+    src_path = ir_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
-            f.write(src)
+            f.write(full_source)
             src_path = Path(f.name)
         ir_path = src_path.with_suffix(".ll")
         result = subprocess.run(
-            ["clang", "-O0", "-S", "-emit-llvm", "-Wno-everything",
+            ["clang", "-O0", "-S", "-emit-llvm",
+             "-Wno-everything", "-ferror-limit=0",
              "-o", str(ir_path), str(src_path)],
-            capture_output=True,
-            timeout=15,
+            capture_output=True, timeout=15,
         )
-        if result.returncode != 0 or not ir_path.exists():
-            return None
-        return ir_path.read_text(errors="replace")
+        stderr = result.stderr.decode(errors="replace")
+        if result.returncode == 0 and ir_path.exists():
+            return ir_path.read_text(errors="replace"), stderr
+        return None, stderr
     except Exception:
-        return None
+        return None, ""
     finally:
-        src_path.unlink(missing_ok=True)
-        ir_path = src_path.with_suffix(".ll")
-        ir_path.unlink(missing_ok=True)
+        if src_path:
+            src_path.unlink(missing_ok=True)
+        if ir_path:
+            ir_path.unlink(missing_ok=True)
+
+
+def compile_to_ir(func_source: str, max_retries: int = 4) -> str | None:
+    """
+    Compile one C function string to LLVM IR.
+
+    On failure, parses clang's stderr for unknown types and undeclared
+    identifiers, injects forward declarations, and retries up to
+    max_retries times. Handles the majority of Devign functions that
+    use project-specific types (AVCodecContext, kmem_cache, etc.).
+    """
+    preamble = PREAMBLE
+    seen_stubs: set[str] = set()
+
+    for attempt in range(max_retries):
+        ir, stderr = _try_compile(preamble + "\n" + func_source)
+        if ir is not None:
+            return ir
+
+        new_stubs: list[str] = []
+
+        for line in stderr.splitlines():
+            # Unknown type name  →  typedef void* TypeName;
+            m = _ERR_UNKNOWN_TYPE.search(line)
+            if m:
+                t = m.group(1)
+                if t not in seen_stubs:
+                    new_stubs.append(f"typedef void* {t};")
+                    seen_stubs.add(t)
+
+            # Undeclared identifier  →  int identifier = 0; (as a global)
+            m = _ERR_UNDECL_IDENT.search(line)
+            if m:
+                t = m.group(1)
+                if t not in seen_stubs:
+                    new_stubs.append(f"static int {t} = 0;")
+                    seen_stubs.add(t)
+
+            # Implicit function declaration  →  extern void* fn();
+            m = _ERR_IMPLICIT_FUNC.search(line)
+            if m:
+                t = m.group(1)
+                if t not in seen_stubs:
+                    new_stubs.append(f"extern void* {t}();")
+                    seen_stubs.add(t)
+
+            # Incomplete struct/union  →  add empty definition
+            m = _ERR_INCOMPLETE.search(line)
+            if m:
+                t = m.group(1)
+                stub = f"struct {t}"
+                if stub not in seen_stubs:
+                    new_stubs.append(f"struct {t} {{}};")
+                    seen_stubs.add(stub)
+
+        if not new_stubs:
+            return None   # error type we can't auto-fix
+        preamble += "\n" + "\n".join(new_stubs)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
