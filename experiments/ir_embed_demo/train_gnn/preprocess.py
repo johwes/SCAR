@@ -40,17 +40,16 @@ PREAMBLE = """\
 #include <assert.h>
 #include <stdarg.h>
 #include <errno.h>
-#include <sys/types.h>
 
-/* suppress GCC/clang extensions that confuse a plain compile */
+/* suppress GCC/clang extensions */
 #define __attribute__(x)
 #define __extension__
-#define __inline__ inline
-#define __volatile__ volatile
+#define __inline__      inline
+#define __volatile__    volatile
 #define __asm__(x)
 #define __builtin_expect(x,y) (x)
-#define likely(x)   (x)
-#define unlikely(x) (x)
+#define likely(x)       (x)
+#define unlikely(x)     (x)
 #define __must_check
 #define __user
 #define __iomem
@@ -61,47 +60,61 @@ PREAMBLE = """\
 #define __exit
 #define noinline
 #define __always_inline inline
+#define __packed
+#define __aligned(x)
+#define __printf(a,b)
 #define EXPORT_SYMBOL(x)
 #define EXPORT_SYMBOL_GPL(x)
 #define MODULE_LICENSE(x)
 #define MODULE_AUTHOR(x)
 #define MODULE_DESCRIPTION(x)
-#define BUG()           ((void)0)
-#define BUG_ON(x)       ((void)(x))
-#define WARN_ON(x)      ((void)(x))
-#define BUILD_BUG_ON(x) ((void)(x))
-#define container_of(ptr,type,member) ((type*)((char*)(ptr) - offsetof(type,member)))
-#define ARRAY_SIZE(x)   (sizeof(x)/sizeof((x)[0]))
-#define min(a,b)        ((a)<(b)?(a):(b))
-#define max(a,b)        ((a)>(b)?(a):(b))
-#define DIV_ROUND_UP(n,d) (((n)+(d)-1)/(d))
 
-typedef unsigned int        uint;
-typedef unsigned long       ulong;
-typedef unsigned char       uchar;
-typedef long long           s64;
-typedef unsigned long long  u64;
-typedef unsigned int        u32;
-typedef unsigned short      u16;
+/* common kernel/FFmpeg macros */
+#define BUG()               ((void)0)
+#define BUG_ON(x)           ((void)(x))
+#define WARN_ON(x)          ((void)(x))
+#define WARN_ON_ONCE(x)     ((void)(x))
+#define BUILD_BUG_ON(x)     ((void)(x))
+#define ARRAY_SIZE(x)       (sizeof(x)/sizeof((x)[0]))
+#define container_of(ptr,type,member) ((type*)((char*)(ptr)-offsetof(type,member)))
+#define min(a,b)            ((a)<(b)?(a):(b))
+#define max(a,b)            ((a)>(b)?(a):(b))
+#define clamp(v,lo,hi)      ((v)<(lo)?(lo):(v)>(hi)?(hi):(v))
+#define DIV_ROUND_UP(n,d)   (((n)+(d)-1)/(d))
+#define IS_ERR(x)           ((unsigned long)(x) > (unsigned long)(-4096))
+#define PTR_ERR(x)          ((long)(x))
+#define ERR_PTR(e)          ((void*)(long)(e))
+#define NULL_CHECK(x)       ((x) != 0)
+#define READ_ONCE(x)        (x)
+#define WRITE_ONCE(x,v)     ((x)=(v))
+
+/* kernel primitive types — NOT in standard headers, safe to define */
 typedef unsigned char       u8;
+typedef unsigned short      u16;
+typedef unsigned int        u32;
+typedef unsigned long long  u64;
 typedef signed char         s8;
-typedef int                 s32;
 typedef short               s16;
-typedef u64                 __u64;
-typedef u32                 __u32;
-typedef u16                 __u16;
-typedef u8                  __u8;
-typedef s64                 __s64;
-typedef s32                 __s32;
-typedef unsigned long       size_t;
-typedef long                ssize_t;
-typedef long                off_t;
-typedef int                 pid_t;
-typedef unsigned int        uid_t;
-typedef unsigned int        gid_t;
-typedef unsigned int        mode_t;
-typedef unsigned long       ino_t;
-typedef int                 dev_t;
+typedef int                 s32;
+typedef long long           s64;
+typedef u8   __u8;
+typedef u16  __u16;
+typedef u32  __u32;
+typedef u64  __u64;
+typedef s8   __s8;
+typedef s16  __s16;
+typedef s32  __s32;
+typedef s64  __s64;
+/* uint/ulong/uchar guarded — system headers may already define them */
+#ifndef __uint_defined
+typedef unsigned int   uint;
+#endif
+#ifndef __ulong_defined
+typedef unsigned long  ulong;
+#endif
+#ifndef __uchar_defined
+typedef unsigned char  uchar;
+#endif
 """
 
 # Regexes to detect fixable clang errors and extract the symbol name
@@ -169,8 +182,8 @@ def _try_compile(full_source: str) -> tuple[str | None, str]:
         if result.returncode == 0 and ir_path.exists():
             return ir_path.read_text(errors="replace"), stderr
         return None, stderr
-    except Exception:
-        return None, ""
+    except Exception as e:
+        return None, f"exception: {e}"
     finally:
         if src_path:
             src_path.unlink(missing_ok=True)
@@ -394,6 +407,39 @@ def process_split(jsonl_path: Path, subset: int | None, workers: int) -> list[di
 # Main
 # ---------------------------------------------------------------------------
 
+def debug_one(jsonl_path: Path) -> None:
+    """Print clang stderr for the first function that fails — for diagnosing attrition."""
+    with open(jsonl_path) as f:
+        for line in f:
+            item = json.loads(line)
+            preamble = PREAMBLE
+            seen: set[str] = set()
+            for attempt in range(4):
+                ir, stderr = _try_compile(preamble + "\n" + item["func"])
+                if ir:
+                    print(f"  compiled OK on attempt {attempt+1}")
+                    break
+                print(f"\n--- attempt {attempt+1} stderr ---\n{stderr[:2000]}")
+                new_stubs = []
+                for err_line in stderr.splitlines():
+                    for pat, tmpl in [
+                        (_ERR_UNKNOWN_TYPE,  "typedef void* {t};"),
+                        (_ERR_UNDECL_IDENT,  "static int {t} = 0;"),
+                        (_ERR_IMPLICIT_FUNC, "extern void* {t}();"),
+                    ]:
+                        m = pat.search(err_line)
+                        if m:
+                            t = m.group(1)
+                            if t not in seen:
+                                new_stubs.append(tmpl.format(t=t))
+                                seen.add(t)
+                if not new_stubs:
+                    print("  no fixable errors found — giving up")
+                    break
+                preamble += "\n" + "\n".join(new_stubs)
+            break   # only debug first function
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--subset",  type=int, default=None,
@@ -402,7 +448,18 @@ def main():
                     help="Parallel compilation workers")
     ap.add_argument("--skip-download", action="store_true",
                     help="Skip download if data/*.jsonl already exist")
+    ap.add_argument("--debug", action="store_true",
+                    help="Print clang stderr for the first failing function and exit")
     args = ap.parse_args()
+
+    if args.debug:
+        src = DATA / "train.jsonl"
+        if not src.exists():
+            print("Run without --debug first to download the dataset.")
+            sys.exit(1)
+        print(f"Debugging first function in {src} ...")
+        debug_one(src)
+        sys.exit(0)
 
     if not args.skip_download:
         print("\n── Download ─────────────────────────────────────────────")
