@@ -290,6 +290,42 @@ than source: no macros, no syntactic sugar, explicit types, explicit memory
 operations, explicit control flow. The 5.6-point gap is the cost of using a GNN
 with hand-coded features, not the cost of using IR.
 
+**Why binary classification is the wrong tool for this problem — and why
+contrastive learning is the right one.**
+
+Even a GNN with access to full identifier vocabulary would face a deeper
+problem: the graph *shape* of a vulnerability is statistically almost
+indistinguishable from safe code of similar structure.
+
+Consider: `if (user_supplied_length > MAX_AUTH_BUFFER)` compiles to:
+```
+%2 = load i32, ptr %1
+%cmp = icmp sgt i32 %2, 256
+```
+The vulnerability is physically there. But `%2` is now an anonymous register —
+mathematically identical to a safe loop counter checking `i < array_size`. A
+memory leak is just a missing edge from `alloca` to `free` in a graph of 300
+nodes. The GNN must deduce, from pure arithmetic, that a specific sequence of
+40 safe operations *should have ended in a `free` but didn't* — without any
+semantic label pointing at the danger zone. Message-passing dilutes the signal
+before it can connect the dots across 300 nodes.
+
+Binary classification asks: *"is this anonymous graph bad?"* — answerable only
+by statistical correlation with patterns the model has seen before. A GNN
+trained on 10K examples with hand-coded opcode features cannot build that
+statistical corpus. CodeBERT can, because it arrives pretrained on billions of
+tokens where `user_supplied_length` and `MAX_AUTH_BUFFER` are already loaded
+with meaning.
+
+**Contrastive learning (section 5) is the correct pivot precisely because it
+changes the question.** Instead of classifying an anonymous graph, the model is
+given a vulnerable IR graph and its exact patched counterpart and asked: *"what
+is the mechanical difference between these two?"* That question IS answerable
+from pure IR structure — the patch is the signal. The model is forced to find
+the specific structural change, not guess from statistical patterns over
+thousands of unrelated graphs. Every accepted SCAR patch produces exactly this
+(vuln_IR, fix_IR) pair at zero marginal cost.
+
 ---
 
 ### 4a. CodeBERT / UniXcoder fine-tune on Devign — lowest friction path
