@@ -648,46 +648,123 @@ a transformer-based classifier for SCAR integration.
 
 ---
 
-### 5. Contrastive learning — parallel paradigm
+### 5. Contrastive learning + vector corpus — parallel paradigm
 
 This is a fundamentally different training objective from the 4x series and
 can be pursued independently of whether classification succeeds or fails.
+It is also the strongest fit for SCAR's self-improvement architecture.
 
 **What changes:** Instead of `f(graph) → {0,1}`, the model learns
 `f(graph) → embedding_vector`. The loss function enforces geometry directly:
 - Same-class pairs (vuln+vuln, fixed+fixed): pulled together
 - Cross-class pairs (vuln+fixed): pushed apart by at least a margin
 
-**Inference on unseen code:**
-1. Compile new function → IR graph → embed it (one forward pass)
-2. Find k-nearest neighbors in a pre-embedded reference corpus
-3. If neighbors are predominantly vulnerable → flag the function
+---
+
+#### The operational system
+
+```
+Train once
+──────────
+Devign graphs ──► GNN (SupCon loss) ──► embedding model (frozen weights)
+
+Populate corpus (one-time)
+──────────────────────────
+All Devign train graphs ──► embedding model ──► vectors ──► vector DB
+                                                            (labelled vuln / fixed)
+
+Scan (per function, per commit)
+───────────────────────────────
+new C function
+  │
+  ▼ clang -O0 -S -emit-llvm
+LLVM IR
+  │
+  ▼ preprocess.py graph extraction
+PDG graph
+  │
+  ▼ embedding model (one forward pass, CPU, <1ms)
+vector
+  │
+  ▼ k-nearest-neighbor query against vector DB
+k neighbours (labelled vuln / fixed)
+  │
+  ▼ majority vote
+finding: "structurally similar to N known-vulnerable functions"
+  + neighbour list for explainability
+
+Enrich (per accepted SCAR patch)
+─────────────────────────────────
+accepted patch ──► compile vulnerable version ──► IR ──► embed
+                ──► insert vector (labelled vuln) into DB
+                ──► future scans automatically benefit, no retraining
+```
 
 No decision boundary. No retrained classifier. The structural shape of
-the new function determines where it lands in embedding space.
+the new function determines where it lands in embedding space, and the
+corpus grows richer with every patch SCAR accepts on any target.
 
-**Why it generalises differently from classification:**
+---
 
-The contrastive loss must find a unified structural criterion that explains
-*all* (vuln, fix) pairs being far apart simultaneously — across FFmpeg, QEMU,
-and the Linux kernel at once. It cannot overfit to one project's naming
-conventions. If successful, it has learned that a specific topological shape
-means "vulnerable", and new code with that shape lands in the same region
-even if never seen during training.
+#### Why this fits SCAR better than a classifier
 
-Classification can draw a project-specific boundary. Contrastive learning
-is forced to find a cross-project invariant.
+**A classifier is a static artifact.** Once trained, it cannot incorporate
+new vulnerability patterns without full retraining. Every SCAR accepted
+patch is wasted signal.
 
-**The SCAR-specific advantage — live corpus without retraining:**
+**The vector corpus is a living database.** Each accepted patch produces a
+labelled `(vuln_IR, fix_IR)` pair at zero marginal cost. Embedding the
+vulnerable version and inserting it into the DB takes milliseconds. The
+model's coverage of real-world patterns grows continuously without touching
+model weights.
 
-Every accepted SCAR patch produces a `(vuln_IR, fix_IR)` pair at zero
-marginal cost. Embed the vulnerable graph → add it to the reference corpus.
-Future scans automatically compare new functions against it. The model's
-"knowledge" of new vulnerability patterns grows with every accepted patch
-without updating model weights. This is structurally impossible with a
-classifier, which requires full retraining to incorporate new patterns.
+**Explainability is free.** A classifier outputs a probability — opaque to
+the developer reviewing the finding. A vector query returns the *neighbours*:
+"this function is structurally similar to these 3 known-vulnerable functions
+from FFmpeg commit abc123." A developer can inspect the neighbours and
+understand why the function was flagged, and what the fix looked like.
 
-**Loss function:**
+**Generalisation is enforced by the loss.** The SupCon loss must find a
+unified structural criterion that explains *all* (vuln, fix) pairs being far
+apart simultaneously — across FFmpeg, QEMU, and the Linux kernel at once.
+It cannot overfit to one project's naming conventions. Classification can
+draw a project-specific boundary; contrastive learning is forced to find a
+cross-project invariant.
+
+---
+
+#### Vector DB options
+
+| Option | Deployment | Notes |
+|---|---|---|
+| **FAISS** | in-process (no server) | Facebook, fast, Python-native, ideal for Tekton sidecar |
+| **Qdrant** | container (OCI image available) | REST API, persistent, good for a shared SCAR corpus PVC |
+| Chroma | in-process or server | simpler API than Qdrant, less production-hardened |
+
+For SCAR's Tekton integration, **FAISS** is the lowest-friction path: the
+corpus is loaded from a file on the PVC at task startup, queried in-process,
+and the file is updated when a patch is accepted. No separate service to
+manage.
+
+For a shared corpus across pipeline runs, **Qdrant** running as a pod with
+a PVC is more appropriate — the corpus persists and grows across all SCAR
+runs on all targets.
+
+---
+
+#### Accuracy expectations
+
+Contrastive learning on the same 45-feature basic-block graphs will not
+close the 5.6-point granularity gap to CodeBERT. The basic-block ceiling
+(~57–58%) applies to both training objectives — contrastive loss cannot
+recover information discarded by block aggregation.
+
+What changes is the *inference paradigm* and the *corpus growth story*, not
+the raw Devign accuracy number. The value is operational, not benchmark.
+
+---
+
+#### Loss function
 
 Supervised Contrastive loss (SupCon, Khosla et al. 2020) is preferred for
 Devign. Within each training batch, all same-label graphs are positives for
@@ -702,15 +779,24 @@ loss = supcon_loss(embeddings, batch.y)   # pulls same-label together,
                                           # pushes different-label apart
 ```
 
-**Relationship to experiments 2 and 4x:**
+The model head changes: instead of `Linear(hidden, 1)` → scalar logit,
+use `Linear(hidden, d_embed)` → normalised d-dimensional vector.
+`d=64` or `d=128` is typical. The rest of the GNN (RGCNConv layers,
+AttentionalAggregation pool) is unchanged.
+
+---
+
+#### Relationship to experiments 2 and 4x
 
 Experiment 2 (opcode histogram + contrastive MLP) was the toy-scale proof
 of concept on 14 samples. Experiment 5 applies the same principle to full
-PDG graphs with the 4d feature set, at Devign scale.
+PDG graphs with the 45-feature 4d feature set, at Devign scale.
 
 The 4x series answers: "can a classifier detect the vulnerability shape?"
-Experiment 5 answers: "can the shape be embedded such that unseen code
-finds its own cluster?"
+Experiment 5 answers: "can the shape be embedded so that unseen code finds
+its own cluster, and so that new vulnerability knowledge can be added
+without retraining?"
 
-Both depend on feature quality — the 43-feature 4d upgrade improves
-both paradigms. Run them on the same preprocessed graphs.
+Both depend on feature quality — the 45-feature 4d upgrade applies to both
+paradigms. Run them on the same preprocessed graphs (no new preprocessing
+needed).
