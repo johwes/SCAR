@@ -77,14 +77,15 @@ def load_graphs(pkl_path: Path) -> list[Data]:
 # Training / evaluation
 # ---------------------------------------------------------------------------
 
-def train_epoch(model, loader, optimizer, device):
+def train_epoch(model, loader, optimizer, device, pos_weight=None):
     model.train()
     total_loss = 0.0
     for batch in loader:
         batch = batch.to(device)
         optimizer.zero_grad()
         logits = model(batch.x, batch.edge_index, batch.batch)
-        loss   = F.binary_cross_entropy_with_logits(logits, batch.y.squeeze())
+        loss   = F.binary_cross_entropy_with_logits(
+                     logits, batch.y.squeeze(), pos_weight=pos_weight)
         loss.backward()
         optimizer.step()
         total_loss += loss.item() * batch.num_graphs
@@ -135,9 +136,11 @@ def main():
 
     print(f"  train={len(train_data)}  valid={len(valid_data)}  test={len(test_data)}")
 
-    vuln_train = sum(1 for d in train_data if d.y.item() == 1)
-    print(f"  train class balance: {vuln_train} vuln / "
-          f"{len(train_data)-vuln_train} fixed\n")
+    vuln_train  = sum(1 for d in train_data if d.y.item() == 1)
+    fixed_train = len(train_data) - vuln_train
+    pos_weight  = torch.tensor([fixed_train / vuln_train]).to(device)
+    print(f"  train class balance: {vuln_train} vuln / {fixed_train} fixed")
+    print(f"  pos_weight: {pos_weight.item():.3f}  (fixed/vuln)\n")
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_data, batch_size=args.batch_size)
@@ -160,7 +163,7 @@ def main():
     print("-" * 35)
 
     for epoch in range(1, args.epochs + 1):
-        loss    = train_epoch(model, train_loader, optimizer, device)
+        loss    = train_epoch(model, train_loader, optimizer, device, pos_weight=pos_weight)
         val_acc = evaluate(model, valid_loader, device)
         scheduler.step()
 
