@@ -263,15 +263,32 @@ steps 1–2 given a `scar-results.json` and a source directory.
 | 5a instruction-level GNN (32-feat one-hot, 30ep h=64) | 55.84% | worse than block-level |
 | 5b GRU hybrid (opcode sequences, 30ep h=64) | 56.96% | below block-level static |
 
-**Granularity gap: 5.6 points** (63.43% − 57.84%). Every GNN architectural
-improvement — relational edges, 34 semantic features, larger hidden, expressive
-attention, instruction-level graphs, GRU sequence encoding — saturated around
-55–58%. **The structural ceiling is confirmed and fundamental.**
+**GNN classifier ceiling: ~57–58%** across all structural variants. Every
+architectural improvement — relational edges, 34 semantic features, larger
+hidden, expressive attention, instruction-level graphs, GRU sequence encoding
+— saturated in this band.
 
-The gap is not recoverable by better opcode encoding. CodeBERT sees variable
-names, type names, and function names in raw source; all IR-based approaches
-discard this vocabulary. The 5.6-point gap is the cost of that discarded
-semantic layer, not a modelling or feature engineering failure.
+**This is a modelling gap, not a representation gap.**
+
+LLVM IR at `-O0` is semantically equivalent to source: every vulnerability
+present in source is present in the IR. Identifier information is preserved —
+`strcpy(buf, src)` becomes `call void @strcpy(i8* %buf, i8* %src)`. The
+variable name `buf`, the function name `strcpy`, the pointer type — all there.
+
+What our GNN discards is not inherent to the IR: it is a consequence of how we
+read the IR. We extract opcodes (one-hot) and 30 hard-coded API presence flags,
+then throw away every other identifier. CodeBERT starts with pretraining on
+billions of tokens and already knows `strcpy` is dangerous, that `buf + len`
+without a bounds check is a pattern, that `malloc` without a null check is
+wrong. Our GNN must learn all of that from 10K labelled examples with
+hand-coded features — and it can't.
+
+**Implication:** a transformer trained directly on IR text — treating LLVM IR as
+a programming language — would likely match CodeBERT performance on this task,
+because the information content is identical. IR may in fact be *more* learnable
+than source: no macros, no syntactic sugar, explicit types, explicit memory
+operations, explicit control flow. The 5.6-point gap is the cost of using a GNN
+with hand-coded features, not the cost of using IR.
 
 ---
 
