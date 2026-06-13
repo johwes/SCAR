@@ -21,7 +21,8 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import RGCNConv, GlobalAttention
+from torch_geometric.nn import RGCNConv
+from torch_geometric.nn.aggr import AttentionalAggregation
 
 HERE = Path(__file__).parent
 DATA = HERE / "data"
@@ -34,20 +35,25 @@ N_FEATURES = 45   # must match preprocess.py: 3 structural + 7 opcode + 3 icmp +
 # ---------------------------------------------------------------------------
 
 class DefectGNN(torch.nn.Module):
-    """Two-layer RGCNConv (PDG) → GlobalAttention pool → binary classifier.
+    """Two-layer RGCNConv (PDG) → AttentionalAggregation pool → binary classifier.
 
     Edge types: 0 = CFG (control flow), 1 = DFG (SSA def-use, data flow).
-    GlobalAttention replaces mean pooling: a learned gate network scores each
-    block before aggregation, focusing on semantically dangerous blocks and
-    muting safe boilerplate — analogous to transformer self-attention but at
-    block granularity with ~64 extra parameters.
+    AttentionalAggregation uses a 2-layer MLP gate: captures non-linear feature
+    interactions (e.g. has_strcpy AND no signed-cmp) that a single linear gate
+    cannot express.
     """
 
     def __init__(self, in_features: int = N_FEATURES, hidden: int = 64):
         super().__init__()
         self.conv1 = RGCNConv(in_features, hidden, num_relations=2)
         self.conv2 = RGCNConv(hidden, hidden, num_relations=2)
-        self.pool  = GlobalAttention(gate_nn=torch.nn.Linear(hidden, 1))
+        gate_nn    = torch.nn.Sequential(
+            torch.nn.Linear(hidden, hidden // 2),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(hidden // 2, 1),
+        )
+        self.pool  = AttentionalAggregation(gate_nn=gate_nn)
         self.lin   = torch.nn.Linear(hidden, 1)
 
     def forward(self, x, edge_index, edge_type, batch):
@@ -161,7 +167,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: DefectGNN-PDG-v2(in={N_FEATURES}, hidden={args.hidden}, relations=2)  "
+    print(f"Model: DefectGNN-PDG-v2.1(in={N_FEATURES}, hidden={args.hidden}, relations=2)  "
           f"params={n_params:,}\n")
 
     # Training loop
