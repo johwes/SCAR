@@ -370,6 +370,28 @@ Accuracy > 69% (UniXcoder) would mean IR structure is earning its cost
 over token-based models. This criterion requires a full compilable dataset
 (either via project build or Juliet).
 
+**Actual result (4b baseline — CFG-only, 10K graphs):**
+
+| Setting | Value |
+|---|---|
+| Train graphs | 10,097 (46% survival, 4,386 vuln / 5,711 fixed) |
+| Val graphs | 1,251 |
+| Test graphs | 1,250 |
+| Epochs | 30, hidden=64 |
+| pos_weight | 1.302 (fixed/vuln, applied to BCE loss) |
+| Best val accuracy | 54.36% (epoch 25) |
+| **Test accuracy** | **55.04%** |
+| Majority-class baseline | 56.6% (always predict "fixed") |
+
+The model barely learned — loss moved only 0.803 → 0.774 over 30 epochs.
+55% is effectively at the majority-class ceiling, confirming that **CFG
+topology alone does not carry enough signal** at basic-block granularity.
+The 11 node features compress an entire basic block to a handful of binary
+flags, making it impossible to distinguish a call to `strcpy` from a call
+to `printf`, or a signed boundary check from an unsigned one.
+
+**→ 4b confirmed insufficient. 4c (RGCNConv + DFG edges) triggered.**
+
 **SCAR integration (after training):**
 
 SCAR's `build-bitcode` task already emits LLVM IR. A new `ir-embed-scan`
@@ -380,11 +402,10 @@ and LLM findings. Zero LLM cost per scan.
 
 ---
 
-### 4c. GNN v2 — RGCNConv + data flow edges (conditional on 4b result)
+### 4c. GNN v2 — RGCNConv + DFG edges (PDG)
 
-**Trigger:** only pursue this if 4b stalls below 62% after ~10K training graphs.
-If 4b reaches 62%+, the CFG-only hypothesis is proved and this becomes a
-research extension rather than a fix.
+**Trigger:** 4b confirmed 55.04% — below 62% threshold. **Implemented.**
+Re-run preprocessing after `git pull` to regenerate graphs with `edge_type`.
 
 **The problem with adding DFG edges to a standard GCNConv:**
 Merging CFG and DFG edges into a single `edge_index` forces the aggregation
@@ -453,3 +474,115 @@ extraction — all the data flow information for values defined and used
 within the function is present in the `.ll` output. Interprocedural data
 flow (tracing values into called functions) is not available, but that
 limitation applies equally to ProGraML without a full project build.
+
+---
+
+### 4d. Semantic feature upgrade — conditional on 4c result
+
+**Trigger:** pursue if 4c (PDG) stalls below 62%.
+
+**Diagnosis if 4c stalls:** the graph topology (nodes and edges) is fine
+but node features are too coarse. The 11-feature vector cannot distinguish
+a call to `strcpy` from a call to `printf`, or a signed boundary check from
+an unsigned one. The model is structurally blind to the vocabulary of danger.
+
+**Strategy:** beat CodeBERT at what it can only approximate — extract
+explicit low-level semantic facts from LLVM IR that a token-based model
+must guess at from variable names and context. All changes are algorithmic
+(no LLM), zero inference latency increase.
+
+All four changes implemented together in one preprocessing + training run.
+
+#### 4d-i. Bag-of-APIs node features
+
+Replace the single `has_call` flag with per-function binary flags covering
+the ~28 functions responsible for the majority of C memory corruption.
+LLVM IR preserves exact call targets (`call i32 @strcpy(...)`) regardless
+of macro expansion or aliasing, making extraction unambiguous.
+
+Safe/unsafe pairs (`strcpy` vs `strncpy`, `sprintf` vs `snprintf`) are
+especially informative — the model can learn that one variant is a red flag
+and the other is not.
+
+| Category | Functions |
+|---|---|
+| Standard alloc/free | `malloc`, `calloc`, `realloc`, `free` |
+| Unbounded string ops | `strcpy`, `strcat`, `sprintf`, `gets` |
+| Bounded string ops | `strncpy`, `strncat`, `snprintf`, `fgets` |
+| Memory ops | `memcpy`, `memmove`, `memset` |
+| FFmpeg | `av_malloc`, `av_mallocz`, `av_realloc`, `av_free`, `av_freep` |
+| Linux kernel | `kmalloc`, `kfree`, `kzalloc`, `vmalloc`, `vfree` |
+| QEMU/GLib | `g_malloc`, `g_malloc0`, `g_realloc`, `g_free`, `g_new` |
+
+#### 4d-ii. icmp semantics
+
+Replace the single `has_icmp` flag with three flags that encode the
+mathematical meaning of the comparison. LLVM IR states this explicitly
+in the instruction name; CodeBERT must infer it from variable names.
+
+| Flag | Matches | Vulnerability relevance |
+|---|---|---|
+| `has_signed_cmp` | `icmp s[lt\|gt\|le\|ge]` | Signed/unsigned mismatch → integer overflow |
+| `has_unsigned_cmp` | `icmp u[lt\|gt\|le\|ge]` | Correct unsigned bounds check |
+| `has_eq_cmp` | `icmp eq`, `icmp ne` | Null check, sentinel value check |
+
+A block with `has_unsigned_cmp=0` before a `memcpy` call is a direct
+IR signature of a missing bounds check.
+
+#### 4d-iii. Type and width semantics
+
+LLVM IR explicitly states the bit-width of every operation. Two flags
+capture the most security-relevant width signals:
+
+- `has_i8_op` — byte-level load/store (buffer iteration at char granularity;
+  combined with `has_getelementptr`, a strong indicator of unsafe buffer walking)
+- `has_64bit_op` — i64 arithmetic (potential truncation when result is
+  narrowed to i32 for a bounds check or array index)
+
+#### 4d-iv. Global Attention readout (train.py only — no preprocessing)
+
+Replace `global_mean_pool` with `GlobalAttention(gate_nn=Linear(hidden, 1))`.
+A single learned linear layer outputs a scalar weight per block before
+aggregation. The model learns to focus on blocks with dangerous semantics
+(e.g., `has_memcpy=1` + `has_unsigned_cmp=0`) and mute boilerplate blocks.
+
+Replicates CodeBERT's self-attention focus mechanism at ~64 extra parameters.
+
+#### Complete 4d feature vector
+
+| Group | Features | Count |
+|---|---|---|
+| Structural | n\_instructions, out\_degree, in\_degree | 3 |
+| Memory ops | has\_call, has\_store, has\_load, has\_alloca, has\_getelementptr | 5 |
+| Control flow | has\_ret, has\_br | 2 |
+| icmp semantics | has\_signed\_cmp, has\_unsigned\_cmp, has\_eq\_cmp | 3 |
+| Type/width | has\_i8\_op, has\_64bit\_op | 2 |
+| API hashing | 28 function flags (see table above) | 28 |
+| **Total** | | **43** |
+
+`N_FEATURES` in `train.py` updates from 11 → 43.
+
+---
+
+### 4e. Opcode embeddings — if 4d stalls
+
+**Trigger:** pursue if 4d stalls below 62%.
+
+More principled replacement for the opcode flags: count all ~70 LLVM
+opcodes per block and look up a learned `d=16` embedding per opcode. The
+block representation becomes `sum(count_i × E[opcode_i])`. The model
+discovers which opcodes correlate with vulnerability rather than relying
+on the curated 4d list.
+
+Requires more training signal to converge than hand-crafted flags — better
+suited to larger datasets. At 10K graphs, 4d's expert knowledge is more
+reliable. At 50K+ graphs, opcode embeddings are more principled.
+
+---
+
+### 4a. CodeBERT / UniXcoder fine-tune — fallback at any stage
+
+If structural GNN approaches consistently fall below 62%, run experiment 4a
+(see above) to establish the ceiling with pre-trained semantics. Use that
+result to decide whether to invest further in the structural path or adopt
+a transformer-based classifier for SCAR integration.
