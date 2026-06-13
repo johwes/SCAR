@@ -247,6 +247,27 @@ steps 1–2 given a `scar-results.json` and a source directory.
 
 ---
 
+### GNN training — results summary
+
+| Method | Test Acc | Notes |
+|---|---|---|
+| Majority-class baseline | 56.6% | always predict "fixed" |
+| 4b CFG-only, GCNConv | 55.04% | barely learning |
+| 4c PDG, RGCNConv | 56.08% | +1.0% from DFG edges |
+| 4d v2.0 PDG + 45 features (30ep h=64) | 56.32% | +0.2% from 34 new features |
+| 4d v2.0 PDG + 45 features (60ep h=128) | **57.84%** | best GNN result; peaks epoch 8 |
+| 4d v2.1 MLP attention gate (30ep h=128) | 56.88% | gate upgrade no meaningful gain |
+| **4a CodeBERT (this run, Colab T4)** | **63.43%** | **granularity gap confirmed** |
+| CodeBERT published baseline | 62.08% | matches within noise |
+| UniXcoder published | 69.29% | upper bound for token-based models |
+
+**Granularity gap: 5.6 points** (63.43% − 57.84%). Every GNN architectural
+improvement — relational edges, 34 semantic features, larger hidden, expressive
+attention — saturated around 57–58%. The ceiling is the basic-block
+representation, not the model capacity or feature richness.
+
+---
+
 ### 4a. CodeBERT / UniXcoder fine-tune on Devign — lowest friction path
 
 **What it is:** Fine-tune a pre-trained transformer on Devign source code.
@@ -300,6 +321,22 @@ a genuinely vulnerable function written in a familiar idiom may not.
 **Success criterion:** reproduce the published accuracy within ±1% to
 confirm the setup is correct. Then fine-tune further on SCAR accepted
 patches to specialise to SCAR's encountered patterns.
+
+**Actual result (4a — CodeBERT on same Devign split, Google Colab T4):**
+
+| Epoch | Val Acc |
+|---|---|
+| 1 | 60.29% |
+| 2 | 62.63% |
+| 3 | 64.71% |
+| 4 | **64.82%** ← best |
+| 5 | 64.31% |
+
+**Test accuracy: 63.43%** (from epoch 4 checkpoint). Exceeds the published 62% baseline, confirming the data pipeline and split are correct.
+
+Note: CodeBERT trains on all ~21K `train.jsonl` examples (no compilation needed), vs ~10K for the GNN (compilation survivors only). Part of the accuracy gap is training data volume, not purely architecture.
+
+**The granularity gap: 63.43% − 57.84% = 5.6 points.** This is the cost of aggregating instructions into basic blocks. Information present in the raw source token sequence is discarded when an entire block is compressed to a 45-dimensional feature vector.
 
 ---
 
@@ -404,7 +441,18 @@ and LLM findings. Zero LLM cost per scan.
 
 ### 4c. GNN v2 — RGCNConv + DFG edges (PDG)
 
-**Trigger:** 4b confirmed 55.04% — below 62% threshold. **Implemented.**
+**Trigger:** 4b confirmed 55.04% — below 62% threshold. **Implemented and completed.**
+
+**Actual result (4c — PDG, 10K graphs):**
+
+| Setting | Value |
+|---|---|
+| Architecture | RGCNConv (2 relations: CFG + DFG) |
+| Epochs / hidden | 30 / 64 |
+| **Test accuracy** | **56.08%** |
+
+DFG edges added +1.04% over 4b. The gradient signal improved (loss moved further) but the model remained well below the 62% threshold. **→ 4d triggered.**
+
 Re-run preprocessing after `git pull` to regenerate graphs with `edge_type`.
 
 **The problem with adding DFG edges to a standard GCNConv:**
@@ -553,14 +601,25 @@ Replicates CodeBERT's self-attention focus mechanism at ~64 extra parameters.
 | Group | Features | Count |
 |---|---|---|
 | Structural | n\_instructions, out\_degree, in\_degree | 3 |
-| Memory ops | has\_call, has\_store, has\_load, has\_alloca, has\_getelementptr | 5 |
-| Control flow | has\_ret, has\_br | 2 |
+| Opcode flags | has\_call, has\_store, has\_load, has\_alloca, has\_getelementptr, has\_ret, has\_br | 7 |
 | icmp semantics | has\_signed\_cmp, has\_unsigned\_cmp, has\_eq\_cmp | 3 |
 | Type/width | has\_i8\_op, has\_64bit\_op | 2 |
-| API hashing | 28 function flags (see table above) | 28 |
-| **Total** | | **43** |
+| API hashing | 30 function flags (see table above) | 30 |
+| **Total** | | **45** |
 
-`N_FEATURES` in `train.py` updates from 11 → 43.
+`N_FEATURES` in `train.py` updates from 11 → 45.
+
+#### Actual results (4d — multiple runs)
+
+| Run | Epochs | Hidden | Notes | Test Acc |
+|---|---|---|---|---|
+| v2.0 | 30 | 64 | linear gate | 56.32% |
+| v2.0 | 60 | 128 | best val epoch 8, then overfit | **57.84%** |
+| v2.1 | 30 | 128 | MLP gate (Linear→ReLU→Dropout→Linear) | 56.88% |
+
+Adding 34 semantic features (API flags, icmp types, type/width) gained only +0.24% over 4c. Increasing capacity (hidden=128, 60 epochs) reached 57.84% but peaked at epoch 8 and overfit thereafter. The MLP attention gate made no meaningful difference.
+
+**Conclusion: basic-block representation is saturated at ~57–58%.** The bottleneck is granularity, not feature richness. Adding more API flags or a more expressive pooling layer cannot recover information that was discarded by aggregating an entire basic block into a single feature vector. **→ 4a (CodeBERT baseline) run to establish ceiling.**
 
 ---
 
