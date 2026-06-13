@@ -715,6 +715,11 @@ _USE_VAR   = re.compile(r"%[\w.]+")
 _BR_COND   = re.compile(r"br i1 .+?label %(\w+).+?label %(\w+)")
 _BR_UNCOND = re.compile(r"br label %(\w+)")
 
+# Opcode extraction for Smart Block Hybrid (GRU node embedder).
+# Two forms: assignment (%name = opcode ...) and plain (opcode ...).
+_OPC_ASSIGN = re.compile(r"^\s*%[\w.]+\s*=\s*(\w+)")
+_OPC_PLAIN  = re.compile(r"^\s+(\w+)")
+
 # Opcodes we track as per-block binary features.
 # "icmp" is handled separately below (signed/unsigned/eq split).
 _TRACKED_OPS = ["call", "store", "load", "alloca", "getelementptr", "ret", "br"]
@@ -914,7 +919,19 @@ def ir_to_graph(ir_text: str) -> dict | None:
     edge_type  = np.array(type_list,   dtype=np.int64) if type_list \
                  else np.zeros(0,       dtype=np.int64)
 
-    return {"x": x, "edge_index": edge_index, "edge_type": edge_type}
+    # Opcode sequence per block — used by the Smart Block Hybrid GRU embedder.
+    # Strips variable names; preserves instruction order within each block.
+    block_opcodes: list[list[str]] = []
+    for b in blocks:
+        ops = []
+        for line in b["lines"]:
+            m = _OPC_ASSIGN.match(line) or _OPC_PLAIN.match(line)
+            if m:
+                ops.append(m.group(1))
+        block_opcodes.append(ops)
+
+    return {"x": x, "edge_index": edge_index, "edge_type": edge_type,
+            "block_opcodes": block_opcodes}
 
 
 # ---------------------------------------------------------------------------
