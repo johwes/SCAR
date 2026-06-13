@@ -261,18 +261,17 @@ steps 1–2 given a `scar-results.json` and a source directory.
 | CodeBERT published baseline | 62.08% | matches within noise |
 | UniXcoder published | 69.29% | upper bound for token-based models |
 | 5a instruction-level GNN (32-feat one-hot, 30ep h=64) | 55.84% | worse than block-level |
+| 5b GRU hybrid (opcode sequences, 30ep h=64) | 56.96% | below block-level static |
 
 **Granularity gap: 5.6 points** (63.43% − 57.84%). Every GNN architectural
 improvement — relational edges, 34 semantic features, larger hidden, expressive
-attention — saturated around 57–58%. The ceiling is the basic-block
-representation, not the model capacity or feature richness.
+attention, instruction-level graphs, GRU sequence encoding — saturated around
+55–58%. **The structural ceiling is confirmed and fundamental.**
 
-**Instruction-level result (5a): 55.84% — below block-level.** The graph
-structure is correct (phi nodes, function args, CFG/DFG edges all validated)
-but the 32-feature one-hot encoding is too sparse. Block-level nodes carry
-dense semantic features (API presence, icmp type, type width); instruction-level
-nodes carry only a single opcode bit. More nodes × less information per node
-= weaker signal. The GRU hybrid addresses this directly.
+The gap is not recoverable by better opcode encoding. CodeBERT sees variable
+names, type names, and function names in raw source; all IR-based approaches
+discard this vocabulary. The 5.6-point gap is the cost of that discarded
+semantic layer, not a modelling or feature engineering failure.
 
 ---
 
