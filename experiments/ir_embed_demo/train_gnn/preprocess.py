@@ -740,7 +740,8 @@ def _parse_ir(ir_text: str) -> list[dict]:
     for line in ir_text.splitlines():
         if re.match(r"^define\b", line):
             in_func   = True
-            current   = {"name": "entry", "lines": [], "successors": []}
+            current   = {"name": "entry", "lines": [], "successors": [],
+                         "defs": set(), "uses": set()}
             cur_blocks = [current]
             continue
 
@@ -756,7 +757,8 @@ def _parse_ir(ir_text: str) -> list[dict]:
 
         m = _BB_LABEL.match(line)
         if m:
-            current = {"name": m.group(1), "lines": [], "successors": []}
+            current = {"name": m.group(1), "lines": [], "successors": [],
+                       "defs": set(), "uses": set()}
             cur_blocks.append(current)
             continue
 
@@ -764,6 +766,21 @@ def _parse_ir(ir_text: str) -> list[dict]:
             continue
 
         current["lines"].append(line)
+
+        # SSA def-use tracking for DFG edges.
+        # _DEF matches the LHS of an assignment; uses live in the RHS.
+        # For non-assignment instructions (store, br, call w/o retval)
+        # every %ref on the line is a use.
+        # Block-label refs (%bb_name in br/phi) are not in value_def_block
+        # so they are naturally filtered when building DFG edges.
+        m_def = _DEF.match(line)
+        if m_def:
+            current["defs"].add(m_def.group(1))
+            for m_use in _USE_VAR.finditer(line[m_def.end():]):
+                current["uses"].add(m_use.group(0))
+        else:
+            for m_use in _USE_VAR.finditer(line):
+                current["uses"].add(m_use.group(0))
 
         m = _BR_COND.search(line)
         if m:
@@ -778,29 +795,56 @@ def _parse_ir(ir_text: str) -> list[dict]:
 
 def ir_to_graph(ir_text: str) -> dict | None:
     """
-    Convert LLVM IR text to a graph dict:
+    Convert LLVM IR text to a PDG graph dict:
       x          : (n_nodes, n_features) float32
-      edge_index : (2, n_edges) int64  — CFG edges
-    Returns None if the IR has fewer than 2 nodes (trivial function).
+      edge_index : (2, n_edges) int64   — CFG + DFG edges concatenated
+      edge_type  : (n_edges,)   int64   — 0 = CFG, 1 = DFG (SSA def-use)
+    Returns None if the IR produces no basic blocks.
     """
     blocks = _parse_ir(ir_text)
     if len(blocks) < 1:
         return None
 
     name_to_idx = {b["name"]: i for i, b in enumerate(blocks)}
-    n = len(blocks)
 
     # CFG edges
-    src_list, dst_list = [], []
+    cfg_src, cfg_dst = [], []
     in_degree = defaultdict(int)
     for b in blocks:
         for succ in b["successors"]:
             if succ in name_to_idx:
                 si = name_to_idx[b["name"]]
                 di = name_to_idx[succ]
-                src_list.append(si)
-                dst_list.append(di)
+                cfg_src.append(si)
+                cfg_dst.append(di)
                 in_degree[di] += 1
+
+    # DFG edges — cross-block SSA def-use chains.
+    # value_def_block: %name -> block index where it is defined.
+    # Block-label references (e.g. %if.then in br instructions) are never
+    # the LHS of an assignment so they are absent from this map and
+    # naturally skipped when iterating uses.
+    value_def_block: dict[str, int] = {}
+    for i, b in enumerate(blocks):
+        for val in b["defs"]:
+            value_def_block[val] = i
+
+    dfg_src, dfg_dst = [], []
+    seen_dfg: set[tuple[int, int]] = set()
+    for i, b in enumerate(blocks):
+        for used_val in b["uses"]:
+            def_blk = value_def_block.get(used_val)
+            if def_blk is not None and def_blk != i:
+                edge = (def_blk, i)
+                if edge not in seen_dfg:
+                    seen_dfg.add(edge)
+                    dfg_src.append(def_blk)
+                    dfg_dst.append(i)
+
+    # Combine CFG (type 0) and DFG (type 1)
+    src_list  = cfg_src  + dfg_src
+    dst_list  = cfg_dst  + dfg_dst
+    type_list = [0] * len(cfg_src) + [1] * len(dfg_src)
 
     # Node features per basic block
     #   [n_instructions, out_degree, in_degree,
@@ -815,11 +859,13 @@ def ir_to_graph(ir_text: str) -> dict | None:
         op_flags  = [1.0 if op in text else 0.0 for op in _TRACKED_OPS]
         features.append([float(n_instr), float(out_deg), float(in_deg)] + op_flags)
 
-    x          = np.array(features,  dtype=np.float32)
+    x          = np.array(features,   dtype=np.float32)
     edge_index = np.array([src_list, dst_list], dtype=np.int64) if src_list \
                  else np.zeros((2, 0), dtype=np.int64)
+    edge_type  = np.array(type_list,   dtype=np.int64) if type_list \
+                 else np.zeros(0,       dtype=np.int64)
 
-    return {"x": x, "edge_index": edge_index}
+    return {"x": x, "edge_index": edge_index, "edge_type": edge_type}
 
 
 # ---------------------------------------------------------------------------
