@@ -715,9 +715,30 @@ _USE_VAR   = re.compile(r"%[\w.]+")
 _BR_COND   = re.compile(r"br i1 .+?label %(\w+).+?label %(\w+)")
 _BR_UNCOND = re.compile(r"br label %(\w+)")
 
-# Opcodes we track as per-block binary features
-_TRACKED_OPS = ["call", "store", "load", "icmp", "alloca",
-                 "getelementptr", "ret", "br"]
+# Opcodes we track as per-block binary features.
+# "icmp" is handled separately below (signed/unsigned/eq split).
+_TRACKED_OPS = ["call", "store", "load", "alloca", "getelementptr", "ret", "br"]
+
+# Dangerous/notable C functions to flag per block.
+# Covers standard C + FFmpeg (av_*) + Linux kernel (k*/vmalloc) + GLib (g_*).
+# Both unsafe variants (strcpy) and safer variants (strncpy) are included so
+# the model can learn the distinction rather than just "any string op = bad".
+_DANGEROUS_APIS = [
+    # Standard memory management
+    "malloc", "calloc", "realloc", "free",
+    # Unbounded string ops — historically the most dangerous
+    "strcpy", "strcat", "sprintf", "gets",
+    # Bounded string ops — safer variants; contrast with unbounded
+    "strncpy", "strncat", "snprintf", "fgets",
+    # Raw memory ops
+    "memcpy", "memmove", "memset",
+    # FFmpeg allocators (dominant in Devign)
+    "av_malloc", "av_mallocz", "av_realloc", "av_free", "av_freep",
+    # Linux kernel allocators
+    "kmalloc", "kfree", "kzalloc", "vmalloc", "vfree",
+    # QEMU / GLib allocators
+    "g_malloc", "g_malloc0", "g_realloc", "g_free", "g_new",
+]
 
 
 def _parse_ir(ir_text: str) -> list[dict]:
@@ -846,18 +867,46 @@ def ir_to_graph(ir_text: str) -> dict | None:
     dst_list  = cfg_dst  + dfg_dst
     type_list = [0] * len(cfg_src) + [1] * len(dfg_src)
 
-    # Node features per basic block
-    #   [n_instructions, out_degree, in_degree,
-    #    has_call, has_store, has_load, has_icmp,
-    #    has_alloca, has_getelementptr, has_ret, has_br]
+    # Node features per basic block (45 total):
+    #   [n_instructions, out_degree, in_degree]            — 3 structural
+    #   [has_call, has_store, has_load, has_alloca,
+    #    has_getelementptr, has_ret, has_br]               — 7 opcode flags
+    #   [has_signed_cmp, has_unsigned_cmp, has_eq_cmp]    — 3 icmp semantics
+    #   [has_i8_op, has_64bit_op]                          — 2 type/width
+    #   [has_malloc, has_calloc, ..., has_g_new]           — 30 API flags
     features = []
     for i, b in enumerate(blocks):
-        text      = " ".join(b["lines"])
-        n_instr   = len([l for l in b["lines"] if l.strip()])
-        out_deg   = len(b["successors"])
-        in_deg    = in_degree[i]
-        op_flags  = [1.0 if op in text else 0.0 for op in _TRACKED_OPS]
-        features.append([float(n_instr), float(out_deg), float(in_deg)] + op_flags)
+        text    = " ".join(b["lines"])
+        n_instr = len([l for l in b["lines"] if l.strip()])
+        out_deg = len(b["successors"])
+        in_deg  = in_degree[i]
+
+        # Generic opcode flags (7)
+        op_flags = [1.0 if op in text else 0.0 for op in _TRACKED_OPS]
+
+        # icmp semantics — LLVM IR encodes comparison type explicitly.
+        # "icmp s*" = signed (slt/sgt/sle/sge); "icmp u*" = unsigned;
+        # "icmp eq"/"icmp ne" = equality / null check.
+        icmp_flags = [
+            1.0 if "icmp s" in text else 0.0,   # has_signed_cmp
+            1.0 if "icmp u" in text else 0.0,   # has_unsigned_cmp
+            1.0 if ("icmp eq" in text or "icmp ne" in text) else 0.0,  # has_eq_cmp
+        ]
+
+        # Type/width flags — byte-level ops flag unsafe buffer walking;
+        # 64-bit arithmetic flags potential truncation when narrowed for bounds.
+        type_flags = [
+            1.0 if " i8"  in text else 0.0,     # has_i8_op
+            1.0 if " i64" in text else 0.0,     # has_64bit_op
+        ]
+
+        # Targeted API flags (30) — @funcname pattern in IR call sites.
+        api_flags = [1.0 if f"@{api}" in text else 0.0 for api in _DANGEROUS_APIS]
+
+        features.append(
+            [float(n_instr), float(out_deg), float(in_deg)]
+            + op_flags + icmp_flags + type_flags + api_flags
+        )
 
     x          = np.array(features,   dtype=np.float32)
     edge_index = np.array([src_list, dst_list], dtype=np.int64) if src_list \
