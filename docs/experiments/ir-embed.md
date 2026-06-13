@@ -586,3 +586,72 @@ If structural GNN approaches consistently fall below 62%, run experiment 4a
 (see above) to establish the ceiling with pre-trained semantics. Use that
 result to decide whether to invest further in the structural path or adopt
 a transformer-based classifier for SCAR integration.
+
+---
+
+### 5. Contrastive learning — parallel paradigm
+
+This is a fundamentally different training objective from the 4x series and
+can be pursued independently of whether classification succeeds or fails.
+
+**What changes:** Instead of `f(graph) → {0,1}`, the model learns
+`f(graph) → embedding_vector`. The loss function enforces geometry directly:
+- Same-class pairs (vuln+vuln, fixed+fixed): pulled together
+- Cross-class pairs (vuln+fixed): pushed apart by at least a margin
+
+**Inference on unseen code:**
+1. Compile new function → IR graph → embed it (one forward pass)
+2. Find k-nearest neighbors in a pre-embedded reference corpus
+3. If neighbors are predominantly vulnerable → flag the function
+
+No decision boundary. No retrained classifier. The structural shape of
+the new function determines where it lands in embedding space.
+
+**Why it generalises differently from classification:**
+
+The contrastive loss must find a unified structural criterion that explains
+*all* (vuln, fix) pairs being far apart simultaneously — across FFmpeg, QEMU,
+and the Linux kernel at once. It cannot overfit to one project's naming
+conventions. If successful, it has learned that a specific topological shape
+means "vulnerable", and new code with that shape lands in the same region
+even if never seen during training.
+
+Classification can draw a project-specific boundary. Contrastive learning
+is forced to find a cross-project invariant.
+
+**The SCAR-specific advantage — live corpus without retraining:**
+
+Every accepted SCAR patch produces a `(vuln_IR, fix_IR)` pair at zero
+marginal cost. Embed the vulnerable graph → add it to the reference corpus.
+Future scans automatically compare new functions against it. The model's
+"knowledge" of new vulnerability patterns grows with every accepted patch
+without updating model weights. This is structurally impossible with a
+classifier, which requires full retraining to incorporate new patterns.
+
+**Loss function:**
+
+Supervised Contrastive loss (SupCon, Khosla et al. 2020) is preferred for
+Devign. Within each training batch, all same-label graphs are positives for
+each other; all different-label graphs are negatives. No explicit pairing
+of commits needed — just the 0/1 labels already in the dataset.
+
+```python
+# Conceptual training loop
+embeddings = model(batch)           # (B, d) — one embedding per graph
+embeddings = F.normalize(embeddings, dim=1)
+loss = supcon_loss(embeddings, batch.y)   # pulls same-label together,
+                                          # pushes different-label apart
+```
+
+**Relationship to experiments 2 and 4x:**
+
+Experiment 2 (opcode histogram + contrastive MLP) was the toy-scale proof
+of concept on 14 samples. Experiment 5 applies the same principle to full
+PDG graphs with the 4d feature set, at Devign scale.
+
+The 4x series answers: "can a classifier detect the vulnerability shape?"
+Experiment 5 answers: "can the shape be embedded such that unseen code
+finds its own cluster?"
+
+Both depend on feature quality — the 43-feature 4d upgrade improves
+both paradigms. Run them on the same preprocessed graphs.
