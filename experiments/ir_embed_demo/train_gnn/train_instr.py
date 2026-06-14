@@ -5,7 +5,7 @@ train_instr.py — Train an instruction-level GNN on Devign IR graphs.
 Requires preprocess_instr.py to have been run first (data/*_instr_graphs.pkl).
 
 Architecture:
-  nn.Embedding(80, 128)        # opcode vocab -> dense embedding
+  nn.Embedding(110, 128)       # opcode vocab -> dense embedding
   RGCNConv(128 -> 64, 3 rels)  # relations: 0=CFG, 1=DFG, 2=Global
   RGCNConv(64 -> 64, 3 rels)
   AttentionalAggregation       # focus on dangerous instructions, mute boilerplate
@@ -37,7 +37,7 @@ from torch_geometric.nn.aggr import AttentionalAggregation
 HERE = Path(__file__).parent
 DATA = HERE / "data"
 
-VOCAB_SIZE = 80
+VOCAB_SIZE = 110
 
 
 # ---------------------------------------------------------------------------

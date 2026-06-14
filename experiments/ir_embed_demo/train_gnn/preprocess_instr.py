@@ -25,6 +25,7 @@ import ctypes
 import json
 import pickle
 import random
+import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -39,14 +40,15 @@ sys.path.insert(0, str(HERE))
 from preprocess import compile_to_ir, download_devign
 
 # ---------------------------------------------------------------------------
-# Opcode vocabulary — 80 entries, indices 0-79
+# Opcode vocabulary — 110 entries, indices 0-109
 #
 # 0     Virtual Context Node (not an opcode; added as node 0 in every graph)
 # 1     Function Argument    (not an opcode; one node per argument)
 # 2-23  ALU / vector
 # 26-32 Memory
 # 36-43 Control-flow
-# 46-47 Comparison
+# 46    icmp fallback (unrecognised predicate)
+# 47    fcmp fallback (unrecognised predicate)
 # 48-60 Cast
 # 61-68 Other
 # 75    Mock/Global (external function call target or global variable)
@@ -54,6 +56,8 @@ from preprocess import compile_to_ir, download_devign
 # 77    Constant floating-point literal
 # 78    Undef / poison value
 # 79    Unknown fallback
+# 80-89 icmp predicates: eq ne slt sle sgt sge ult ule ugt uge
+# 90-105 fcmp predicates: false oeq ogt oge olt ole one ord uno ueq ugt uge ult ule une true
 # ---------------------------------------------------------------------------
 
 OPCODE_VOCAB: dict[str, int] = {
@@ -69,7 +73,8 @@ OPCODE_VOCAB: dict[str, int] = {
     # Control-flow
     "br": 36, "switch": 37, "ret": 38, "invoke": 39,
     "resume": 40, "unreachable": 41, "indirectbr": 42, "callbr": 43,
-    # Comparison
+    # Comparison — fallback IDs used when predicate is unrecognised.
+    # _instr_node_id() routes known predicates to IDs 80-105 instead.
     "icmp": 46, "fcmp": 47,
     # Cast
     "trunc": 48, "zext": 49, "sext": 50, "fptrunc": 51, "fpext": 52,
@@ -79,7 +84,7 @@ OPCODE_VOCAB: dict[str, int] = {
     "phi": 61, "select": 62, "call": 63, "extractvalue": 64,
     "insertvalue": 65, "va_arg": 66, "landingpad": 67, "freeze": 68,
 }
-VOCAB_SIZE = 80
+VOCAB_SIZE = 110
 
 IDX_CONTEXT   = 0
 IDX_ARGUMENT  = 1
@@ -88,6 +93,40 @@ IDX_CONST_INT = 76
 IDX_CONST_FP  = 77
 IDX_UNDEF     = 78
 IDX_UNKNOWN   = 79
+
+_ICMP_PRED_RE = re.compile(r'\bicmp\s+(\w+)\b')
+_FCMP_PRED_RE = re.compile(r'\bfcmp\s+(\w+)\b')
+
+# icmp predicate → vocab ID (80-89)
+_ICMP_PRED_IDS: dict[str, int] = {
+    "eq": 80,  "ne": 81,
+    "slt": 82, "sle": 83, "sgt": 84, "sge": 85,
+    "ult": 86, "ule": 87, "ugt": 88, "uge": 89,
+}
+# fcmp predicate → vocab ID (90-105)
+_FCMP_PRED_IDS: dict[str, int] = {
+    "false": 90, "oeq": 91, "ogt": 92, "oge": 93,
+    "olt":  94,  "ole": 95, "one": 96, "ord": 97,
+    "uno":  98,  "ueq": 99, "ugt": 100, "uge": 101,
+    "ult":  102, "ule": 103, "une": 104, "true": 105,
+}
+
+
+def _instr_node_id(instr) -> int:
+    """Return vocab ID for an llvmlite instruction, expanding icmp/fcmp predicates."""
+    op = instr.opcode
+    if op == "icmp":
+        m = _ICMP_PRED_RE.search(str(instr))
+        if m:
+            return _ICMP_PRED_IDS.get(m.group(1), IDX_UNKNOWN)
+        return 46  # fallback: icmp with unrecognised predicate
+    if op == "fcmp":
+        m = _FCMP_PRED_RE.search(str(instr))
+        if m:
+            return _FCMP_PRED_IDS.get(m.group(1), IDX_UNKNOWN)
+        return 47  # fallback: fcmp with unrecognised predicate
+    return OPCODE_VOCAB.get(op, IDX_UNKNOWN)
+
 
 # ValueKind integer constants (llvmlite 0.47 / LLVM 14)
 VK_ARGUMENT     = 0
@@ -160,7 +199,7 @@ def ir_to_graph_instr(ir_text: str) -> dict | None:
                 block_first_instr[bpid] = node_counter
                 first_in_block = False
             ptr_to_id[ipid] = node_counter
-            node_opcodes.append(OPCODE_VOCAB.get(instr.opcode, IDX_UNKNOWN))
+            node_opcodes.append(_instr_node_id(instr))
             node_counter += 1
 
     if node_counter < 2:

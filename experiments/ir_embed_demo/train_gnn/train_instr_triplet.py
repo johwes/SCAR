@@ -9,7 +9,7 @@ At instruction level, the same patch changes 3-5 nodes in a ~300-node graph, so 
 are now structurally distinguishable.
 
 Architecture: InstructionContrastiveGNN
-  Embedding:  nn.Embedding(80, 128)  <- opcode vocab (no float features)
+  Embedding:  nn.Embedding(110, 128) <- opcode vocab (no float features)
   Encoder:    RGCNConv(128->64, 3 rels) x 2 + AttentionalAggregation
   Proj head:  Linear(64->128) -> ReLU -> Linear(128->128) -> L2-norm  (training only)
   Inference:  encoder output, cosine k-NN
@@ -46,7 +46,7 @@ from torch_geometric.nn.aggr import AttentionalAggregation
 HERE = Path(__file__).parent
 DATA = HERE / "data"
 
-VOCAB   = 80
+VOCAB   = 110
 PAD_IDX = 79
 
 
