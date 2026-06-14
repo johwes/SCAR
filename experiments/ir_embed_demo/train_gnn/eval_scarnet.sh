@@ -76,7 +76,7 @@ for rel in "${SOURCES[@]}"; do
     ll_file="$IR_DIR/${base}.ll"
 
     printf "Compiling %-30s ... " "$rel"
-    if ! clang -O1 -S -emit-llvm \
+    if ! clang -O0 -fno-inline -S -emit-llvm \
                -I "$CLONE_DIR/include" \
                -o "$ll_file" "$c_file" 2>/dev/null; then
         echo "FAILED (skip)"
