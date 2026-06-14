@@ -69,21 +69,23 @@ def load_pairs(csv_path: Path, subset: int | None, seed: int) -> list[tuple]:
     print(f"  Usable pairs (vul=1, before!=after): {len(df):,}")
 
     rng  = random.Random(seed)
-    rows = list(df.itertuples(index=True))
-    rng.shuffle(rows)
+    idxs = list(df.index)
+    rng.shuffle(idxs)
     if subset:
-        rows = rows[:subset]
-        print(f"  Using subset of {len(rows):,} pairs")
+        idxs = idxs[:subset]
+        print(f"  Using subset of {len(idxs):,} pairs")
 
     result = []
-    for r in rows:
-        d = r._asdict()
+    for idx in idxs:
+        row = df.loc[idx]
+        cwe = str(row["CWE ID"]) if pd.notna(row["CWE ID"]) else "CWE-unknown"
+        cve = str(row["CVE ID"]) if pd.notna(row["CVE ID"]) else "unknown"
         result.append((
-            r.Index,
-            d["func_before"],
-            d["func_after"],
-            str(d.get("CWE_ID", d.get("CWE ID", "CWE-unknown")) or "CWE-unknown"),
-            str(d.get("CVE_ID", d.get("CVE ID", "unknown")) or "unknown"),
+            idx,
+            row["func_before"],
+            row["func_after"],
+            cwe or "CWE-unknown",
+            cve or "unknown",
         ))
     return result
 
