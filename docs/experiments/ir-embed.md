@@ -2,7 +2,7 @@
 
 **Code:** `experiments/ir_embed_demo/`  
 **Hypothesis:** `docs/research.md` — Contrastive structural embeddings over LLVM IR  
-**Status:** **COMPLETE.** Structural ceiling confirmed at ~58%. All GNN variants exhausted (4b/4c/4d/5a/5b/5c). Block-level classifier (57.84%, `model.pt`) is the pipeline deliverable. CodeBERT (63.43%) establishes the semantic ceiling. Series closed.
+**Status:** **COMPLETE.** Structural ceiling confirmed at ~58% across all GNN variants, training objectives (BCE, SupCon, Triplet), and datasets (Devign, BigVul). Block-level classifier (57.84%, `model.pt`) is the pipeline deliverable. CodeBERT (63.43%) establishes the semantic ceiling. Series closed.
 
 ---
 
@@ -263,6 +263,7 @@ steps 1–2 given a `scar-results.json` and a source directory.
 | 5a instruction-level GNN (32-feat one-hot, 30ep h=64) | 55.84% | worse than block-level |
 | 5b GRU hybrid (opcode sequences, 30ep h=64) | 56.96% | below block-level static |
 | 5c SupCon k-NN (batch=512, τ=0.07, k=5, 50ep) | 55.84% | embedding collapse — see §5c |
+| **6 BigVul Triplet k-NN (batch=32, margin=0.3, k=5, 50ep)** | **51.21%** | soft collapse; pair-sim 0.98 throughout — see §6 |
 
 **GNN structural ceiling: ~57–58%** across all variants and training objectives. Every
 architectural improvement — relational edges, 34 semantic features, larger
@@ -1082,4 +1083,53 @@ next step.
 
 #### Results
 
-*In progress — preprocessing and training run pending.*
+| Metric | Value |
+|---|---|
+| Train pairs (after compilation) | 1,117 of 6,964 (84% attrition) |
+| Valid pairs | 122 of 1,711 (93% attrition) |
+| Test pairs | 124 of 839 (85% attrition) |
+| Best val k-NN (epoch 15) | 54.51% |
+| **Test k-NN (k=5)** | **51.21%** |
+| Mean (vuln, fix) cosine similarity | 0.9823 (epoch 1: 0.979 → epoch 50: 0.986) |
+
+**Result: coin-flip accuracy. Block-level ceiling confirmed for triplet loss too.**
+
+Training diagnostics:
+
+- **Loss decreased (0.46 → 0.34)** — no flatline. Triplet signal is real when commit pairs exist.
+  The gradient does not collapse the way SupCon did. This is the correct result for the loss function.
+- **Pair cosine similarity increased (0.979 → 0.986)** — wrong direction. Vuln and fix embeddings
+  became *more* similar over training. The model failed to push pairs apart.
+- **Val k-NN oscillated 44–54% with no trend** — 122 samples × 0.8% per sample = noise.
+
+#### Autopsy
+
+At block level, a 3–5 line patch across a 50–100 block function changes a handful of feature
+values in a handful of nodes. The vuln and fix graphs are already 0.979 cosine-similar at epoch 1
+— there is barely any signal to push apart, and 1,117 training pairs is too few to learn a
+manifold from it. The model reduces active triplet violations by drifting toward a region where
+all embeddings are similar (~0.98 to each other), which lowers the loss without learning anything.
+
+| Failure mode | SupCon on Devign | Triplet on BigVul |
+|---|---|---|
+| Symptom | Hard flatline at log(batch) | Soft collapse; pair sim increases |
+| Root cause | Categorical label gradient cancellation | Block granularity below patch resolution |
+| Loss moved? | No | Yes (0.46 → 0.34) |
+| k-NN useful? | No | No |
+
+**The block-level ceiling (~58%) applies to triplet loss.** The structural diff between a
+vulnerable function and its patch is present in the IR but below the resolution of block-level
+aggregation. No training objective operating on 45-dimensional per-block feature vectors can
+recover information that was discarded when each basic block was compressed to a single vector.
+
+Attrition was also severe: 84–93% across splits, yielding only 1,363 usable pairs total.
+Stub injection (as used in the Devign pipeline) would reduce attrition to ~50%, but even with
+3,000–5,000 pairs, the granularity problem remains — more data does not change the block-level
+resolution.
+
+**Series conclusion:** The structural ceiling is ~58% for any training objective, dataset, or
+architecture that operates on block-level basic-block feature vectors. Instruction-level graphs
+(each IR instruction as a node, ~70-dim opcode one-hot features) would see the structural diff
+directly — the missing `icmp + br` is literally a missing edge — but represent 3–4 weeks of
+parser rewrite and 10–20× more nodes per graph. That is a research investment, not an
+incremental experiment.
