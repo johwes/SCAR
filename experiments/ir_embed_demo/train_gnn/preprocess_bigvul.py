@@ -10,6 +10,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import time
 import pandas as pd
 
 HERE = Path(__file__).parent
@@ -35,8 +36,13 @@ def process_pair(args: tuple) -> dict | None:
 
 
 def load_pairs(csv_path: Path, subset: int | None, seed: int) -> list[tuple]:
-    print(f"Loading {csv_path} ...")
+    size_mb = csv_path.stat().st_size / 1e6
+    print(f"Loading {csv_path} ({size_mb:.0f} MB) ...")
+    if size_mb > 500:
+        print(f"  Large file — pandas python engine may take several minutes, please wait ...")
+    t0 = time.time()
     df = pd.read_csv(csv_path, encoding="latin-1", engine="python", on_bad_lines="skip")
+    print(f"  Read in {time.time()-t0:.0f}s")
     print(f"  Raw rows: {len(df):,}")
 
     df.columns = [c.strip() for c in df.columns]
@@ -114,7 +120,7 @@ def process_split(pairs: list[tuple], workers: int) -> list[dict]:
             g = process_pair(args)
             if g: graphs.append(g); ok += 1
             else: fail += 1
-            if i % 200 == 0:
+            if i % max(1, min(50, total//10)) == 0:
                 print(f"    {i}/{total}  ok={ok}  failed={fail}")
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
