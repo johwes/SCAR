@@ -36,7 +36,7 @@ def process_pair(args: tuple) -> dict | None:
 
 def load_pairs(csv_path: Path, subset: int | None, seed: int) -> list[tuple]:
     print(f"Loading {csv_path} ...")
-    df = pd.read_csv(csv_path, low_memory=False, encoding="latin-1")
+    df = pd.read_csv(csv_path, low_memory=False, encoding="latin-1", engine="python", on_bad_lines="skip")
     print(f"  Raw rows: {len(df):,}")
 
     df.columns = [c.strip() for c in df.columns]
