@@ -41,8 +41,10 @@ def main():
         x = (x - x.mean(0)) / (x.std(0) + 1e-8)
     batch = torch.zeros(x.shape[0], dtype=torch.long)
 
-    model = DefectGNN(N_FEATURES)
-    model.load_state_dict(torch.load(args.model, map_location="cpu", weights_only=True))
+    ckpt   = torch.load(args.model, map_location="cpu", weights_only=True)
+    hidden = ckpt["lin.weight"].shape[1]
+    model  = DefectGNN(N_FEATURES, hidden=hidden)
+    model.load_state_dict(ckpt)
     model.eval()
 
     with torch.no_grad():
