@@ -76,8 +76,8 @@ def load_pairs(csv_path: Path, subset: int | None, seed: int) -> list[tuple]:
             r.Index,
             d["func_before"],
             d["func_after"],
-            str(d.get("CWE ID", "CWE-unknown") or "CWE-unknown"),
-            str(d.get("CVE ID", "unknown") or "unknown"),
+            str(d.get("CWE_ID", d.get("CWE ID", "CWE-unknown")) or "CWE-unknown"),
+            str(d.get("CVE_ID", d.get("CVE ID", "unknown")) or "unknown"),
         ))
     return result
 
@@ -126,7 +126,8 @@ def process_split(pairs: list[tuple], workers: int) -> list[dict]:
                 if i % 200 == 0:
                     print(f"    {i}/{total}  ok={ok}  failed={fail}")
 
-    print(f"  Done: {ok} pairs compiled, {fail} failed ({fail/total*100:.0f}% attrition)")
+    attrition = fail/total*100 if total > 0 else 0
+    print(f"  Done: {ok} pairs compiled, {fail} failed ({attrition:.0f}% attrition)")
     return graphs
 
 
