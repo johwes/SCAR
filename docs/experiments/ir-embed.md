@@ -2,7 +2,7 @@
 
 **Code:** `experiments/ir_embed_demo/`  
 **Hypothesis:** `docs/research.md` — Contrastive structural embeddings over LLVM IR  
-**Status:** **ACTIVE.** Instruction-level GNN (§7) cleared the block-level ceiling (58.00% > 57.84%); extended run (60ep h=128) overfits to 56.16%. Best instruction-level: 58.00% (30ep h=64). Instruction-level contrastive on BigVul is the next experiment. Block-level classifier (57.84%, `model.pt`) remains the pipeline deliverable.
+**Status:** **COMPLETE.** §7 instruction-level GNN: 58.00% (30ep h=64) — first result to clear the block-level ceiling (57.84%). §8 instruction-level BigVul triplet: 48.39%, pair-sim 0.9984→0.9995 (wrong direction) — contrastive direction closed. Best classifier: instruction-level GNN 58.00%; pipeline deliverable: block-level GNN 57.84% (`model.pt`).
 
 ---
 
@@ -1289,3 +1289,119 @@ ceiling was cleared. The margin is narrow because:
 aggregation discards. Whether that signal is sufficient to make instruction-level contrastive
 learning on BigVul succeed (where block-level pair cosine similarity was already 0.979) is
 the open question for the next experiment.
+
+---
+
+## §8 — Instruction-Level BigVul Triplet Contrastive Learning
+
+**Script:** `train_instr_triplet.py` (model) + `preprocess_instr_bigvul.py` (data)  
+**Hypothesis:** Triplet loss failed at block level (§6) because a 3-line patch leaves
+the block adjacency matrix near-invariant (pair-sim 0.979→0.986). At instruction
+level, the same patch changes 3–5 nodes in a ~300-node graph — pairs should be
+structurally distinguishable.
+
+### Model: InstructionContrastiveGNN
+
+```
+nn.Embedding(80, 128, padding_idx=79)     # opcode vocab → dense embedding
+RGCNConv(128 → 64, num_relations=3) × 2  # 3 rels: CFG / DFG / Global
+AttentionalAggregation
+Projection head: Linear(64→128) → ReLU → Linear(128→128) → L2-norm
+```
+
+86,465 parameters. x loaded as long (opcode indices). No z-score normalisation.
+
+### Preprocessing results
+
+```
+Raw BigVul rows:         6,807,803
+Usable pairs (vul=1):       9,514
+
+  train:  1,117 pairs  (84% attrition from 6,964 raw)
+  valid:    122 pairs  (93% attrition from 1,711 raw)
+  test:     124 pairs  (85% attrition from   839 raw)
+```
+
+Attrition is identical to §6 (block-level BigVul) — both use the same `compile_to_ir()`
+bottleneck. Instruction-level graph extraction adds no additional failure modes.
+
+Top CWEs: CWE-119 (172), CWE-125 (96), CWE-20 (78), CWE-unknown (65), CWE-264 (58).
+
+### Training results (30ep, hidden=64, margin=0.3, batch=64)
+
+```
+Epoch      Loss   Pair-Sim   Val k-NN
+------------------------------------------------
+    1    0.4197     0.9984     49.59%  <- best
+    3    0.4272     0.9986     52.87%  <- best
+   17    0.3528     0.9995     54.10%  <- best
+   30    0.3517     0.9995     52.46%
+```
+
+**Test k-NN accuracy (k=5): 48.39%**  
+**Mean (vuln, fix) cosine similarity: 0.9995** (wrong direction — should decrease)
+
+| Method | Test Acc | Pair-Sim |
+|---|---|---|
+| BigVul block-level Triplet (§6) | 51.21% | 0.979 → 0.986 ↑ |
+| Instruction-level classifier (§7) | 58.00% | — |
+| **BigVul instruction-level Triplet (§8)** | **48.39%** | **0.9984 → 0.9995 ↑** |
+
+### Diagnosis: hypothesis falsified
+
+**Pair-sim went the wrong direction: 0.9984 → 0.9995.** Worse than block-level (0.979).
+The model pulled both graphs into the same attractor; triplet loss provided no separating force.
+
+The core assumption was wrong. At instruction level, ~297–497 of ~300–500 nodes are *identical*
+between vuln and fix — only 3–5 nodes change (0.6–1.7% of the graph). The model sees an
+overwhelming shared topology and collapses. Crucially, instruction-level pairs are *more*
+similar (0.9995) than block-level pairs (0.979), because the shared instruction structure
+is richer and dominates harder than block-level aggregate statistics.
+
+Block-level nodes encode aggregate features per basic block (opcode counts, memory ops, etc.).
+When a 3-line patch changes a branch condition, those aggregate counts shift noticeably. At
+instruction level, the same patch changes 3 nodes out of 300 — the absolute delta is larger
+in blocks, not smaller, because block features collapse hundreds of instructions into 45 floats
+that change proportionally.
+
+**Data starvation compounds the collapse:** only 1,117 training pairs survive (same 84–93%
+attrition as §6). The model cannot learn fine-grained structural differences from this volume.
+
+### Series conclusion: contrastive direction closed
+
+Three consecutive contrastive experiments have collapsed:
+
+| Experiment | Method | Pair-Sim | Result |
+|---|---|---|---|
+| §5c | SupCon k-NN (Devign, block) | — | 55.84% — embedding collapse (frozen at log(512)) |
+| §6 | BigVul Triplet (block-level) | 0.979 → 0.986 ↑ | 51.21% — soft collapse |
+| §8 | BigVul Triplet (instruction-level) | 0.9984 → 0.9995 ↑ | 48.39% — soft collapse (worse) |
+
+**Root cause:** GNN structural topology alone is insufficient to separate (vuln, fix) pairs
+when only 0.6–1.7% of nodes differ. The encoder has no access to identifier names, string
+literals, or semantic tokens — only opcode categories. CodeBERT's 5.6-point advantage over
+the best GNN (63.43% vs 58.00%) comes entirely from pretraining on source text that carries
+these identifiers.
+
+### What would actually work
+
+To break the 58% ceiling without LLM pretraining:
+
+1. **Identifier-augmented nodes** — include hashed variable names or type signatures as
+   additional node features. LLVM IR preserves all identifiers; discarding them is the primary
+   information loss.
+2. **Anchor-positive from same function, different commit** — the current positive mining
+   (same-CWE) does not guarantee structural similarity. Ground-truth positives from the same
+   CVE would provide a cleaner gradient.
+3. **Larger dataset without the clang attrition problem** — BigVul's 84–93% compilation
+   failure rate leaves too little data. A dataset compiled in advance (pre-generated IR) would
+   eliminate this bottleneck.
+
+### Pipeline status
+
+The **block-level GNN classifier (57.84%, `model.pt`)** remains the pipeline deliverable:
+zero-LLM-cost pre-filter for the SCAR triage stage. The instruction-level classifier (58.00%)
+is not yet deployed — the marginal improvement (+0.16%) does not justify replacing the
+existing `scan_ir.py` / `model.pt` infrastructure.
+
+The contrastive embedding direction (§5c / §6 / §8) is closed pending richer node features.
