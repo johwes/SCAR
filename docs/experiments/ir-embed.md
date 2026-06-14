@@ -955,6 +955,24 @@ This is a successful engineering boundary discovery. The block-level GNN
 **Status: IN PROGRESS**  
 **Scripts:** `train_gnn/preprocess_bigvul.py`, `train_gnn/train_triplet.py`
 
+#### Motivation
+
+The SupCon experiment (§5c) revealed a specific, fixable problem: the loss
+collapsed because Devign has no commit-pairing metadata. Every vulnerable
+function is treated as equivalent to every other, so the loss tries to pull
+a buffer overflow and a race condition toward the same point in embedding
+space — they are structurally unrelated, the gradients cancel, and the model
+gives up. The failure is not a fundamental limit of contrastive learning; it
+is a property of the dataset.
+
+BigVul has the one thing Devign lacks: every row is a matched
+`(func_before, func_after)` pair from a real CVE commit. This makes the fix
+the guaranteed negative for its own vulnerability. Instead of asking the model
+to find what all vulnerabilities have in common (impossible — they don't), we
+ask it one precise question per pair: *learn the structural diff between this
+function and its patch.* That question is answerable from IR structure alone,
+because the diff IS in the IR.
+
 #### Why BigVul instead of Devign
 
 §5c confirmed that SupCon collapses on Devign because the dataset has no
