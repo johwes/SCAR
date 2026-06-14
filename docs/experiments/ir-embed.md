@@ -947,3 +947,121 @@ This is a successful engineering boundary discovery. The block-level GNN
 - **The 57.84% number is a Devign proxy.** On SCAR's actual targets (with
   full build context from Tekton's `build-bitcode` task), attrition is lower
   and the feature distribution better matches real-world vulnerability patterns.
+
+---
+
+### 6. BigVul — Triplet Contrastive Learning with exact (vuln, fix) commit pairs
+
+**Status: IN PROGRESS**  
+**Scripts:** `train_gnn/preprocess_bigvul.py`, `train_gnn/train_triplet.py`
+
+#### Why BigVul instead of Devign
+
+§5c confirmed that SupCon collapses on Devign because the dataset has no
+commit-pairing metadata. All vulnerable functions are treated as positives
+for each other, producing contradictory structural gradients that cancel.
+
+**BigVul (MSR_20)** has the structural property Devign lacks: every row is
+an explicit `(func_before, func_after)` commit pair for a real CVE. The exact
+structural diff — the patch itself — is the training signal. Triplet Loss with
+`anchor=vuln_IR, negative=exact_fix_IR` makes the gradient precise and
+unambiguous, answerable from IR structure alone.
+
+| Property | Devign | BigVul |
+|---|---|---|
+| Dataset size | 27K functions | 9,514 usable (vuln, fix) pairs |
+| Commit pairing | ✗ none | ✓ explicit per row |
+| Languages | C/C++ | C/C++ only |
+| Split strategy | by function | by CVE (used here) |
+| SupCon viability | ✗ categorical collapse | — |
+| Triplet viability | ✗ no pairs | ✓ guaranteed negatives |
+
+#### Dataset download
+
+BigVul is distributed as `MSR_data_cleaned.csv` (~10 GB uncompressed).
+
+```bash
+cd experiments/ir_embed_demo/train_gnn
+mkdir -p data
+
+pip install gdown
+gdown 1-0VhnHBp9IGh90s2wCNjeCMuy70HPl8X -O data/bigvul.zip
+unzip data/bigvul.zip -d data/
+# Result: data/MSR_data_cleaned.csv (~10 GB)
+```
+
+The zip (~1.5 GB) unpacks to the full CSV. The file uses latin-1 encoding
+and contains C function bodies with unescaped quotes — the preprocessor
+handles both.
+
+#### Preprocessing
+
+```bash
+python3 preprocess_bigvul.py --csv data/MSR_data_cleaned.csv --workers 4
+```
+
+Filters to `vul=1` rows where `func_before != func_after` (~9,514 pairs from
+~6.8M rows). Splits by CVE ID to prevent leakage: 80/10/10 on unique CVE IDs.
+Compiles both sides of each pair to LLVM IR (`clang -O0 -S -emit-llvm`) and
+extracts PDG graphs using the same `preprocess.py` extractor as the 4x series
+(45 features, CFG + DFG edges). Saves three pickle files:
+
+```
+data/bigvul_train_pairs.pkl   — list of {"vuln": graph, "fix": graph, "cwe": ..., "cve": ...}
+data/bigvul_valid_pairs.pkl
+data/bigvul_test_pairs.pkl
+```
+
+Expected attrition: ~40-60% (compilation failures on isolated snippets without
+full project context). Expected usable pairs: ~4,000-6,000 after compilation.
+
+Progress output every ~10% of pairs; file size and elapsed time shown for the
+10 GB CSV read (typically 3-8 minutes through the Python engine).
+
+#### Training
+
+```bash
+python3 train_triplet.py --epochs 50 --batch-size 128
+```
+
+Reuses `ContrastiveGNN` from `train_contrastive.py` unchanged (RGCNConv
+encoder + projection head). Triplet Loss with guaranteed negatives:
+
+```python
+def triplet_loss(anchor, positive, negative, margin=0.3):
+    pos_sim = (anchor * positive).sum(dim=-1)   # anchor vs same-CWE vuln
+    neg_sim = (anchor * negative).sum(dim=-1)   # anchor vs its own patch
+    loss = torch.clamp(neg_sim - pos_sim + margin, min=0.0)
+    return loss[loss > 0].mean()
+```
+
+- **anchor** = vuln embedding
+- **negative** = its paired fix embedding (exact structural diff, guaranteed)
+- **positive** = another vuln in batch with same CWE; fallback to nearest other vuln
+
+The negative is always available from the paired fix — no mining required.
+Each gradient is specific to one structural diff rather than a categorical
+average across all vulnerability types.
+
+Evaluation: same `build_corpus` + `knn_accuracy` from `train_contrastive.py`.
+Corpus = all training vuln embeddings (L2-normalized). Also reports mean
+cosine similarity between (vuln, fix) pairs each epoch — should decrease as
+the model learns to push them apart.
+
+#### What success looks like
+
+| Signal | Target |
+|---|---|
+| Loss trajectory | Decreasing from epoch 1 (no log(N) flatline) |
+| Val k-NN by epoch 10 | > 58% (structural diff signal is real) |
+| Mean (vuln, fix) cosine similarity | Decreasing over training |
+| Test k-NN | > 60% (closes meaningful portion of 5.6pt gap to CodeBERT) |
+
+If val k-NN stalls at 57-58% again, the ceiling is confirmed at the block
+level: a 3-5 line patch across 50-100 IR blocks is too localised for
+block-level aggregation to capture. Instruction-level graphs would be the
+next step.
+
+#### Results
+
+*In progress — preprocessing and training run pending.*
