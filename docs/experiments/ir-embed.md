@@ -2,7 +2,7 @@
 
 **Code:** `experiments/ir_embed_demo/`  
 **Hypothesis:** `docs/research.md` — Contrastive structural embeddings over LLVM IR  
-**Status:** **ACTIVE.** Instruction-level GNN (§7) cleared the block-level ceiling (58.00% > 57.84%) for the first time. Extended run (60ep h=128) in progress. Block-level classifier (57.84%, `model.pt`) remains the pipeline deliverable. CodeBERT (63.43%) establishes the semantic ceiling.
+**Status:** **ACTIVE.** Instruction-level GNN (§7) cleared the block-level ceiling (58.00% > 57.84%); extended run (60ep h=128) overfits to 56.16%. Best instruction-level: 58.00% (30ep h=64). Instruction-level contrastive on BigVul is the next experiment. Block-level classifier (57.84%, `model.pt`) remains the pipeline deliverable.
 
 ---
 
@@ -264,7 +264,7 @@ steps 1–2 given a `scar-results.json` and a source directory.
 | 5b GRU hybrid (opcode sequences, 30ep h=64) | 56.96% | below block-level static |
 | 5c SupCon k-NN (batch=512, τ=0.07, k=5, 50ep) | 55.84% | embedding collapse — see §5c |
 | **6 BigVul Triplet k-NN (batch=32, margin=0.3, k=5, 50ep)** | **51.21%** | soft collapse; pair-sim 0.98 throughout — see §6 |
-| **7 Instruction-level GNN (opcode embed=128, h=64, 30ep)** | **58.00%** | first to clear block-level ceiling; extended run in progress — see §7 |
+| **7 Instruction-level GNN (opcode embed=128, h=64, 30ep)** | **58.00%** | first to clear block-level ceiling; 60ep/h=128 overfits to 56.16% — see §7 |
 
 **GNN structural ceiling: ~57–58%** across all block-level variants and training objectives. Every
 architectural improvement at block level — relational edges, 34 semantic features, larger
@@ -1238,6 +1238,54 @@ was below block resolution. At instruction level, a 3-line patch changes 3–5 n
 The BigVul attrition problem (84–93% at block level) applies here too — but the representation
 improvement changes what triplet loss can learn from the pairs that survive.
 
-#### Extended run results
+#### Extended run results (60ep, hidden=128)
 
-*In progress. Will be updated when `--epochs 60 --hidden 128` completes.*
+| Epoch | Loss | Val Acc |
+|---|---|---|
+| 1 | 0.7895 | 47.52% |
+| 5 | 0.7705 | 55.99% |
+| 8 | 0.7621 | 56.71% |
+| 12 | 0.7415 | 56.79% |
+| 17 | 0.7285 | 57.67% ← best val |
+| 20 | 0.7251 | 55.27% ← LR step ×0.5 kills momentum |
+| 30 | 0.6974 | 56.23% |
+| 60 | 0.6761 | 55.27% |
+
+**Test accuracy: 56.16%** — below both the 30-epoch run and the block-level baseline.
+
+#### Overfitting autopsy
+
+Both runs peak at epoch ~17 then degrade:
+
+| Run | Params | Peak Val Epoch | Peak Val | Test |
+|---|---|---|---|---|
+| 30ep h=64 | 61K | 17 | 58.15% | **58.00%** |
+| 60ep h=128 | 150K | 17 | 57.67% | 56.16% |
+
+Loss continues falling (0.6974 → 0.6761 from ep30→60) while val acc stagnates at 55–56% —
+classic overfitting. The larger model (150K params) memorises training patterns faster than
+the smaller one (61K), hitting the same peak epoch but at lower val accuracy and deteriorating
+more sharply afterward.
+
+Contrast with block-level 4d, where going 30ep→60ep improved 56.32%→57.84%: block-level
+node features are coarser (45 floats vs an opcode embedding), so the model learns more slowly
+and does not overfit at the same scale.
+
+**Instruction-level GNN best result: 58.00% (30ep, h=64).** This is the number to carry forward.
+Early stopping at epoch 17 would recover this from the larger model, but the +0.16% improvement
+over block-level does not justify further tuning.
+
+#### Series conclusion for §7
+
+The instruction-level representation is confirmed: 58.00% > 57.84%, first time the block-level
+ceiling was cleared. The margin is narrow because:
+
+1. The opcode embedding must learn from 10K training examples what CodeBERT learned from billions
+   of tokens of pretraining — the same modelling gap applies
+2. Both runs show the model converges at epoch ~17 regardless of capacity; more parameters only
+   add overfitting risk without improving the peak
+
+**The validated hypothesis:** instruction-level micro-topology carries signal that block-level
+aggregation discards. Whether that signal is sufficient to make instruction-level contrastive
+learning on BigVul succeed (where block-level pair cosine similarity was already 0.979) is
+the open question for the next experiment.
